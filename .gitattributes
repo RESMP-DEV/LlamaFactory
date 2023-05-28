@@ -1,0 +1,3 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+data/lilith_v0.2/*.jsonl !text !filter !merge !diff
