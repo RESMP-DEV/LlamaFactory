@@ -3377,6 +3377,18 @@ register_model_group(
 
 register_model_group(
     models={
+        "Youtu-VL-4B-Instruct": {
+            DownloadSource.DEFAULT: "tencent/Youtu-VL-4B-Instruct",
+            DownloadSource.MODELSCOPE: "Tencent-YouTu-Research/Youtu-VL-4B-Instruct",
+        },
+    },
+    template="youtu_vl",
+    multimodal=True,
+)
+
+
+register_model_group(
+    models={
         "Yuan2-2B-Chat": {
             DownloadSource.DEFAULT: "IEITYuan/Yuan2-2B-hf",
             DownloadSource.MODELSCOPE: "YuanLLM/Yuan2.0-2B-hf",
