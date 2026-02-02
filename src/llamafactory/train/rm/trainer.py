@@ -114,7 +114,7 @@ class PairwiseTrainer(Trainer):
         if state_dict is None:
             state_dict = self.model.state_dict()
 
-        if self.args.save_safetensors:
+        if getattr(self.args, "save_safetensors", True):
             from collections import defaultdict
 
             ptrs = defaultdict(list)

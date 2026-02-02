@@ -206,9 +206,6 @@ class BaseModelArguments:
         if self.model_name_or_path is None:
             raise ValueError("Please provide `model_name_or_path`.")
 
-        if self.split_special_tokens and self.use_fast_tokenizer:
-            raise ValueError("`split_special_tokens` is only supported for slow tokenizers.")
-
         if self.adapter_name_or_path is not None:  # support merging multiple lora weights
             self.adapter_name_or_path = [path.strip() for path in self.adapter_name_or_path.split(",")]
 

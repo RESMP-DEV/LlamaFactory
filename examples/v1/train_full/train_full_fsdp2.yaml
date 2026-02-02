@@ -18,7 +18,7 @@ init_config:
   name: init_on_meta
 
 ### data
-train_dataset: data/v1_sft_demo.yaml 
+train_dataset: data/v1_sft_demo.yaml
 
 ### training
 output_dir: outputs/test_fsdp2

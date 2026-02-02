@@ -139,10 +139,6 @@ def _verify_model_args(
         if model_args.adapter_name_or_path is not None and len(model_args.adapter_name_or_path) != 1:
             raise ValueError("Quantized model only accepts a single adapter. Merge them first.")
 
-    if data_args.template == "yi" and model_args.use_fast_tokenizer:
-        logger.warning_rank0("We should use slow tokenizer for the Yi models. Change `use_fast_tokenizer` to False.")
-        model_args.use_fast_tokenizer = False
-
 
 def _check_extra_dependencies(
     model_args: "ModelArguments",
@@ -188,9 +184,7 @@ def _check_extra_dependencies(
 
     if training_args is not None:
         if training_args.deepspeed:
-            # pin deepspeed version < 0.17 because of https://github.com/deepspeedai/DeepSpeed/issues/7347
             check_version("deepspeed", mandatory=True)
-            check_version("deepspeed>=0.10.0,<=0.16.9")
 
         if training_args.predict_with_generate:
             check_version("jieba", mandatory=True)

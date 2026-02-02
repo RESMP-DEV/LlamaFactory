@@ -17,7 +17,7 @@ import os
 import pytest
 import torch
 from PIL import Image
-from transformers import AutoConfig, AutoModelForVision2Seq
+from transformers import AutoConfig, AutoModelForImageTextToText
 
 from llamafactory.data import get_template_and_fix_tokenizer
 from llamafactory.data.collator import MultiModalDataCollatorForSeq2Seq, prepare_4d_attention_mask
@@ -82,7 +82,7 @@ def test_multimodal_collator():
     template = get_template_and_fix_tokenizer(tokenizer_module["tokenizer"], data_args)
     config = AutoConfig.from_pretrained(model_args.model_name_or_path)
     with torch.device("meta"):
-        model = AutoModelForVision2Seq.from_config(config)
+        model = AutoModelForImageTextToText.from_config(config)
 
     data_collator = MultiModalDataCollatorForSeq2Seq(
         template=template,
