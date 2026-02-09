@@ -459,6 +459,18 @@ class ReasoningTemplate(Template):
         return [(encoded_messages[i], encoded_messages[i + 1]) for i in range(0, len(encoded_messages), 2)]
 
 
+@dataclass
+class Glm47ReasoningTemplate(ReasoningTemplate):
+    r"""GLM-4.7 uses only the closing </think> tag for empty thinking blocks."""
+
+    @override
+    def add_thought(self, content: str = "") -> str:
+        if not content:
+            return self.thought_words[1]
+
+        return self.thought_words[0] + content + self.thought_words[1]
+
+
 TEMPLATES: dict[str, "Template"] = {}
 
 
@@ -1046,6 +1058,23 @@ register_template(
     efficient_eos=True,
     mm_plugin=get_mm_plugin(name="glm4v", image_token="<|image|>", video_token="<|video|>"),
     template_class=ReasoningTemplate,
+)
+
+
+# copied from glm4_moe template
+register_template(
+    name="glm4_7",
+    format_user=StringFormatter(slots=["<|user|>\n{{content}}<|assistant|>"]),
+    format_assistant=StringFormatter(slots=["\n{{content}}"]),
+    format_system=StringFormatter(slots=["<|system|>\n{{content}}"]),
+    format_function=FunctionFormatter(slots=["{{content}}"], tool_format="glm4_moe"),
+    format_observation=StringFormatter(slots=["<|observation|>\n{{content}}<|assistant|>"]),
+    format_tools=ToolFormatter(tool_format="glm4_moe"),
+    format_prefix=EmptyFormatter(slots=["[gMASK]<sop>"]),
+    stop_words=["<|user|>", "<|observation|>"],
+    thought_words=("<think>", "</think>"),
+    efficient_eos=True,
+    template_class=Glm47ReasoningTemplate,
 )
 
 

@@ -941,6 +941,17 @@ register_model_group(
 
 register_model_group(
     models={
+        "GLM-4.7-Flash": {
+            DownloadSource.DEFAULT: "zai-org/GLM-4.7-Flash",
+            DownloadSource.MODELSCOPE: "ZhipuAI/GLM-4.7-Flash",
+        },
+    },
+    template="glm4_7",
+)
+
+
+register_model_group(
+    models={
         "GLM-Z1-0414-9B-Chat": {
             DownloadSource.DEFAULT: "zai-org/GLM-Z1-9B-0414",
             DownloadSource.MODELSCOPE: "ZhipuAI/GLM-Z1-9B-0414",

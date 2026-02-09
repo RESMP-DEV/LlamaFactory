@@ -77,6 +77,11 @@ def add_z3_leaf_module(model: "PreTrainedModel") -> None:
 
         _set_z3_leaf_modules(model, [Glm4MoeMoE])
 
+    if model_type == "glm4_moe_lite":
+        from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
+
+        _set_z3_leaf_modules(model, [Glm4MoeLiteMoE])
+
     if model_type == "glm4v_moe":
         from transformers.models.glm4v_moe.modeling_glm4v_moe import Glm4vMoeTextMoE
 
