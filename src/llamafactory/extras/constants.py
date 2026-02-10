@@ -952,6 +952,18 @@ register_model_group(
 
 register_model_group(
     models={
+        "GLM-OCR": {
+            DownloadSource.DEFAULT: "zai-org/GLM-OCR",
+            DownloadSource.MODELSCOPE: "ZhipuAI/GLM-OCR",
+        },
+    },
+    template="glm_ocr",
+    multimodal=True,
+)
+
+
+register_model_group(
+    models={
         "GLM-Z1-0414-9B-Chat": {
             DownloadSource.DEFAULT: "zai-org/GLM-Z1-9B-0414",
             DownloadSource.MODELSCOPE: "ZhipuAI/GLM-Z1-9B-0414",

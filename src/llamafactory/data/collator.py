@@ -213,6 +213,7 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             and getattr(self.model.config, "model_type", None)
             in [
                 "glm4v",
+                "glm_ocr",
                 "Keye",
                 "qwen2_vl",
                 "qwen2_5_vl",
