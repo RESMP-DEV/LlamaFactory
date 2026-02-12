@@ -90,6 +90,26 @@ class ModelEngine:
         Transformers can choose the proper model init context.
         https://github.com/huggingface/transformers/blob/v5.0.0rc0/src/transformers/modeling_utils.py#L3538
         """
+        if self.args.init_config is not None:
+            from ..plugins.model_plugins.initialization import InitPlugin
+
+            init_device = InitPlugin(self.args.init_config.name)()
+        else:
+            init_device = DistributedInterface().current_device
+
+        init_kwargs = {"device_map": init_device}
+
+        if self.args.quant_config is not None:
+            from ..plugins.model_plugins.quantization import QuantizationPlugin
+
+            init_kwargs = QuantizationPlugin(self.args.quant_config.name)(
+                init_kwargs=init_kwargs,
+                config=self.model_config,
+                tokenizer=self.processor,
+                model_args=self.args,
+                is_trainable=self.is_train,
+            )
+
         if self.args.model_class == ModelClass.LLM:
             from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
@@ -107,14 +127,8 @@ class ModelEngine:
 
             AutoClass = AutoModel
 
-        if self.args.init_config is not None:
-            from ..plugins.model_plugins.initialization import InitPlugin
-
-            init_device = InitPlugin(self.args.init_config.name)()
-        else:
-            init_device = DistributedInterface().current_device
-
         if init_device.type == DeviceType.META:
+            assert self.args.quant_config is None, "Quantization is not supported with meta device."
             with init_empty_weights():
                 model = AutoClass.from_config(self.model_config)
         else:
@@ -122,8 +136,8 @@ class ModelEngine:
                 self.args.model,
                 config=self.model_config,
                 dtype="auto",
-                device_map=init_device,
                 trust_remote_code=self.args.trust_remote_code,
+                **init_kwargs,
             )
 
         if self.args.peft_config is None:
