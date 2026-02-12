@@ -125,6 +125,11 @@ def launch():
 
         run_chat()
 
+    elif command == "merge":
+        from llamafactory.v1.plugins.model_plugins.peft import merge_and_export_model
+
+        merge_and_export_model()
+
     elif command == "env":
         raise NotImplementedError("Environment information is not implemented yet.")
 

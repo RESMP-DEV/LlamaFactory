@@ -33,7 +33,7 @@ def run_sft(args: InputArgument = None):
     model_args, data_args, training_args, _ = get_args(args)
     DistributedInterface(training_args.dist_config)
     train_dataset = DataEngine(data_args.train_dataset)
-    model_engine = ModelEngine(model_args)
+    model_engine = ModelEngine(model_args, is_train=True)
     trainer = SFTTrainer(
         args=training_args,
         model=model_engine.model,
