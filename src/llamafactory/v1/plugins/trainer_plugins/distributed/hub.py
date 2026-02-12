@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from ....config.arg_utils import PluginConfig
 from ....utils.plugin import BasePlugin
-from ....utils.types import HFModel
+
+
+if TYPE_CHECKING:
+    from ....utils.types import HFModel, Processor
 
 
 class DistributedPlugin(BasePlugin):
@@ -23,12 +30,32 @@ class DistributedPlugin(BasePlugin):
 
 
 @DistributedPlugin("fsdp2").register()
-def shard_model_fsdp2(model: HFModel, dist_config: PluginConfig) -> HFModel:
+def shard_model_fsdp2(model: HFModel, dist_config: PluginConfig, **kwargs) -> HFModel:
     from .fsdp2 import FSDP2Engine
 
     return FSDP2Engine(dist_config).shard_model(model)
 
 
+@DistributedPlugin("fsdp2").register("save_model")
+def save_model_fsdp2(model: HFModel, output_dir: str, processor: Processor) -> None:
+    from .fsdp2 import save_model
+
+    return save_model(model, output_dir, processor)
+
+
 @DistributedPlugin("deepspeed").register()
-def shard_model_deepspeed(model: HFModel, dist_config: PluginConfig) -> HFModel:
-    return model
+def shard_model_deepspeed(model: HFModel, dist_config: PluginConfig, **kwargs) -> HFModel:
+    from .deepspeed import DeepSpeedEngine
+
+    return DeepSpeedEngine(
+        dist_config,
+        num_micro_batch=kwargs.get("num_micro_batch"),
+        micro_batch_size=kwargs.get("micro_batch_size"),
+    ).shard_model(model)
+
+
+@DistributedPlugin("deepspeed").register("save_model")
+def save_model_deepspeed(model: HFModel, output_dir: str, processor: Processor) -> None:
+    from .deepspeed import save_model
+
+    return save_model(model, output_dir, processor)
