@@ -166,3 +166,33 @@ def _manage_distributed_env(request: FixtureRequest, monkeypatch: MonkeyPatch) -
 def fix_valuehead_cpu_loading():
     """Fix valuehead model loading."""
     patch_valuehead_model()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def bypass_mistral_regex_check():
+    """Disable Mistral regex network check.
+
+    Monkey-patch TokenizersBackend._patch_mistral_regex into a no-op.
+    """
+    try:
+        from transformers.tokenization_utils_fast import TokenizersBackend
+    except ImportError:
+        # Very old transformers, nothing to patch
+        yield
+        return
+
+    if not hasattr(TokenizersBackend, "_patch_mistral_regex"):
+        # Method does not exist in this version
+        yield
+        return
+
+    # Backup original method
+    original = TokenizersBackend._patch_mistral_regex
+
+    # Replace with no-op
+    TokenizersBackend._patch_mistral_regex = lambda cls, tokenizer, *args, **kwargs: tokenizer
+
+    yield
+
+    # Restore original method
+    TokenizersBackend._patch_mistral_regex = original
