@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bayesian hyperparameter sweep using Ax/BoTorch via AxClient."""
+"""Bayesian hyperparameter sweep using Ax/BoTorch via the new Client API."""
 
 import json
 import os
@@ -23,21 +23,24 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from ax.service.ax_client import AxClient, ObjectiveProperties
+from ax.api.client import Client
+from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
 
 
 # ---------------------------------------------------------------------------
-# Parameter space
+# Parameter space (new-style config objects)
 # ---------------------------------------------------------------------------
 
+# Note: LR upper bound raised to 1e-3 — base models benefit from higher LRs for initial chat format learning.
+# lora_rank extended to 128 — base→chat SFT needs higher rank to capture behavioral patterns.
 PARAMETERS = [
-    {"name": "learning_rate", "type": "range", "bounds": [1e-5, 5e-4], "log_scale": True},
-    {"name": "lora_rank", "type": "choice", "values": [8, 16, 32, 64], "is_ordered": True},
-    {"name": "lora_dropout", "type": "range", "bounds": [0.0, 0.1]},
-    {"name": "warmup_ratio", "type": "range", "bounds": [0.03, 0.15]},
-    {"name": "weight_decay", "type": "range", "bounds": [0.0, 0.1]},
-    {"name": "per_device_train_batch_size", "type": "choice", "values": [1, 2, 4], "is_ordered": True},
-    {"name": "gradient_accumulation_steps", "type": "range", "bounds": [2, 16], "parameter_type": "int"},
+    RangeParameterConfig(name="learning_rate", bounds=(1e-5, 1e-3), parameter_type="float", scaling="log"),
+    ChoiceParameterConfig(name="lora_rank", values=[8, 16, 32, 64, 128], parameter_type="int", is_ordered=True),
+    RangeParameterConfig(name="lora_dropout", bounds=(0.0, 0.1), parameter_type="float"),
+    RangeParameterConfig(name="warmup_ratio", bounds=(0.03, 0.15), parameter_type="float"),
+    RangeParameterConfig(name="weight_decay", bounds=(0.0, 0.1), parameter_type="float"),
+    ChoiceParameterConfig(name="per_device_train_batch_size", values=[1, 2, 4], parameter_type="int", is_ordered=True),
+    RangeParameterConfig(name="gradient_accumulation_steps", bounds=(2, 16), parameter_type="int"),
 ]
 
 
@@ -158,17 +161,21 @@ def run_bayesian_sweep(
     max_steps_per_trial: int = 100,
 ) -> dict[str, Any]:
     """Run Bayesian sweep with Sobol initialization + BoTorch optimization."""
-    ax_client = AxClient(enforce_sequential_optimization=True, verbose_logging=False)
-    ax_client.create_experiment(
+    client = Client()
+    client.configure_experiment(
         name="qwen3_coder_next_lora_sweep",
         parameters=PARAMETERS,
-        objectives={"eval_loss": ObjectiveProperties(minimize=True)},
-        num_initialization_trials=num_initial,
+    )
+    client.configure_optimization(objective="-eval_loss")
+    client.configure_generation_strategy(
+        method="quality",
+        initialization_budget=num_initial,
     )
 
     results = []
     for trial_i in range(num_trials):
-        params, trial_index = ax_client.get_next_trial()
+        next_trials = client.get_next_trials(max_trials=1)
+        trial_index, params = next(iter(next_trials.items()))
         loss = run_trial(
             trial_index=trial_index,
             params=params,
@@ -176,18 +183,19 @@ def run_bayesian_sweep(
             output_dir=output_dir,
             max_steps=max_steps_per_trial,
         )
-        ax_client.complete_trial(trial_index=trial_index, raw_data={"eval_loss": loss})
-        results.append({"trial_index": trial_index, "params": params, "eval_loss": loss})
+        client.complete_trial(trial_index=trial_index, raw_data={"eval_loss": loss})
+        results.append({"trial_index": trial_index, "params": dict(params), "eval_loss": loss})
         print(f"\n[Sweep] Trial {trial_i + 1}/{num_trials} done. Loss={loss:.4f}")
 
-    best_params, values = ax_client.get_best_parameters()
-    print(f"\n[Sweep] Best params: {best_params}")
-    print(f"[Sweep] Best predicted loss: {values}")
+    best_params, values, best_trial_index, arm_name = client.get_best_parameterization()
+    print(f"\n[Sweep] Best params (trial {best_trial_index}): {best_params}")
+    print(f"[Sweep] Best predicted values: {values}")
 
     # Save results summary
     summary = {
-        "best_params": best_params,
+        "best_params": dict(best_params),
         "best_values": str(values),
+        "best_trial_index": best_trial_index,
         "all_trials": results,
     }
     summary_path = os.path.join(output_dir, "sweep_summary.json")
@@ -195,7 +203,7 @@ def run_bayesian_sweep(
         json.dump(summary, f, indent=2)
     print(f"[Sweep] Summary saved to {summary_path}")
 
-    return best_params
+    return dict(best_params)
 
 
 if __name__ == "__main__":

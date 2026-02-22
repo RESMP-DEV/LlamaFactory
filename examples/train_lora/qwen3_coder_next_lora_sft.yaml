@@ -10,13 +10,14 @@ upcast_layernorm: true
 stage: sft
 do_train: true
 finetuning_type: lora
-lora_rank: 8
+lora_rank: 32
 lora_target: all
 
 ### dataset
 dataset: lilith_v0.2
 template: qwen3_nothink
-cutoff_len: 8192
+cutoff_len: 4096
+packing: false
 streaming: false
 max_samples: null
 dataloader_num_workers: 0
@@ -32,19 +33,20 @@ save_only_model: false
 report_to: none
 
 ### train
-per_device_train_batch_size: 2
-gradient_accumulation_steps: 4
-learning_rate: 1.0e-4
-num_train_epochs: 3.0
-max_steps: 100
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+learning_rate: 2.0e-4
+num_train_epochs: 1.0
+max_steps: -1
 lr_scheduler_type: cosine
-warmup_ratio: 0.1
+warmup_ratio: 0.05
 bf16: true
 ddp_timeout: 180000000
 resume_from_checkpoint: null
 
 ### eval
-val_size: 1024
-per_device_eval_batch_size: 2
+val_size: 512
+per_device_eval_batch_size: 1
 eval_strategy: steps
 eval_steps: 500
