@@ -200,6 +200,13 @@ def load_model(
             if _torch.cuda.is_available():
                 _mem_before = _torch.cuda.memory_allocated(_dev) / (1024**3)
                 logger.info_rank0(f"GPU memory before BnB move: {_mem_before:.2f} GiB allocated on {_dev}")
+
+            # For models with 3D expert parameters (e.g. Qwen3Next), BnB's replace_with_bnb_linear
+            # only handles nn.Linear — the batched expert tensors need a separate quantization pass.
+            if getattr(config, "model_type", None) == "qwen3_next":
+                from .model_utils.quantization import _quantize_qwen3next_experts
+                _quantize_qwen3next_experts(model, model_args)
+
             logger.info_rank0("Moving BnB 4-bit model to GPU (pre-quantized uint8 on CPU -> CUDA)...")
             # Explicitly move each Params4bit first (bnb_quantized=True, moves uint8)
             import bitsandbytes as _bnb
