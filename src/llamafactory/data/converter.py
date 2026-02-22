@@ -17,6 +17,8 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
+from datasets import Features, Sequence, Value
+
 from ..extras import logging
 from .data_utils import Role
 
@@ -417,9 +419,20 @@ def align_dataset(
         )
 
     dataset_converter = get_dataset_converter(dataset_attr.formatting, dataset_attr, data_args)
+    message_feature = [{"role": Value("string"), "content": Value("string")}]
+    aligned_features = Features({
+        "_prompt": message_feature,
+        "_response": message_feature,
+        "_system": Value("string"),
+        "_tools": Value("string"),
+        "_images": Sequence(Value("string")),
+        "_videos": Sequence(Value("string")),
+        "_audios": Sequence(Value("string")),
+    })
     return dataset.map(
         dataset_converter,
         batched=False,
         remove_columns=column_names,
+        features=aligned_features if not data_args.streaming else None,
         **kwargs,
     )

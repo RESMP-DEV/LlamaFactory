@@ -278,17 +278,22 @@ def _quantize_qwen3next_experts(model: "torch.nn.Module", model_args: "ModelArgu
     if found:
         logger.info_rank0(
             f"Quantized Qwen3NextExperts in {found} block(s) using BnB {bnb_cfg.upper()} "
-            f"(double_quant={double_quant}). Expert weights are now 4-bit on CPU "
-            f"(batched dequant: 2 CUDA calls/layer instead of per-expert loops)."
+            f"(double_quant={double_quant}). Expert weights are now 4-bit on GPU "
+            f"(2 dequant calls/layer + 1 cpu sync/layer via bincount; ~512x fewer syncs than per-expert .item())."
         )
 
 
 def _patch_qwen3next_experts_forward(module: "torch.nn.Module") -> None:
-    """Replace Qwen3NextExperts.forward with a batched-dequant version.
+    """Replace Qwen3NextExperts.forward with a sync-efficient batched-dequant version.
 
-    Dequantizes ALL experts for the layer in 2 CUDA calls (gate_up + down), then
-    indexes into the resulting dense tensor for each active expert.  This avoids
-    ~480 serial per-expert dequant calls per training step, giving ~100x speedup.
+    Strategy:
+    - Dequantize ALL experts in 2 CUDA calls (gate_up + down).  With top-10 routing
+      over 512 experts and 4096 tokens, virtually all experts are active, so full
+      dequantization is cheaper than selective dequantization.
+    - Sort tokens by expert assignment, then use ONE cpu().tolist() sync per layer to
+      get per-expert token counts.  The inner loop uses Python-int indexing which never
+      triggers GPU→CPU sync.  This reduces blocking syncs from 512/layer to 1/layer
+      (~512× less synchronization overhead).
     Peak extra VRAM: ~3 GiB per layer (held only during the layer's forward, then freed).
     """
     import torch.nn.functional as F
@@ -314,21 +319,37 @@ def _patch_qwen3next_experts_forward(module: "torch.nn.Module") -> None:
             self._bnb_down_proj_quant, self._bnb_down_proj_qs
         ).to(dtype).view(N, O_dn, I_dn)  # [num_experts, out, in]
 
-        with torch.no_grad():
-            expert_mask = F.one_hot(top_k_index, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)  # [num_experts, top_k, batch]
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        # Build flat (token, expert, weight) view of the top-k routing table.
+        seq_len, top_k = top_k_index.shape
+        flat_expert_ids = top_k_index.view(-1)                              # [seq*top_k]
+        flat_token_ids = (
+            torch.arange(seq_len, device=device)
+            .unsqueeze(1).expand(-1, top_k).reshape(-1)                     # [seq*top_k]
+        )
+        flat_weights = top_k_weights.view(-1)                               # [seq*top_k]
 
-        for expert_idx_t in expert_hit:
-            expert_idx = expert_idx_t[0].item()
-            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
-            current_state = hidden_states[token_idx]
+        # Sort by expert so all activations for the same expert are contiguous.
+        sort_idx = flat_expert_ids.argsort(stable=True)                     # GPU sort, no CPU sync
+        sorted_expert_ids = flat_expert_ids[sort_idx]
+        sorted_token_ids  = flat_token_ids[sort_idx]
+        sorted_weights    = flat_weights[sort_idx]
 
-            gate, up = F.linear(current_state, gate_up_all[expert_idx]).chunk(2, dim=-1)
-            current_hidden = self.act_fn(gate) * up
-            current_hidden = F.linear(current_hidden, down_all[expert_idx])
-            current_hidden = current_hidden * top_k_weights[token_idx, top_k_pos, None]
-            final_hidden_states.index_add_(0, token_idx, current_hidden.to(dtype))
+        # ONE CPU↔GPU sync for all 512 expert counts at once (vs 512 per-expert syncs).
+        counts = sorted_expert_ids.bincount(minlength=N).cpu().tolist()
+
+        offset = 0
+        for e_id, count in enumerate(counts):                               # Python int, no sync
+            if count == 0:
+                offset += count
+                continue
+            tok_ids  = sorted_token_ids[offset : offset + count]            # slice, no sync
+            e_hidden = hidden_states[tok_ids]                               # GPU gather
+            # Python-int indexing into pre-dequantized tensors — no GPU sync.
+            gate, up = F.linear(e_hidden, gate_up_all[e_id]).chunk(2, dim=-1)
+            out = F.linear(self.act_fn(gate) * up, down_all[e_id])
+            out = out * sorted_weights[offset : offset + count].unsqueeze(-1)
+            final_hidden_states.index_add_(0, tok_ids, out.to(dtype))
+            offset += count
 
         return final_hidden_states
 
