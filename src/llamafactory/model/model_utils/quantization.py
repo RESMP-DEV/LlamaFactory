@@ -190,11 +190,12 @@ def configure_quantization(
 
                 check_version("bitsandbytes>=0.43.0", mandatory=True)
             else:
-                # transformers>=5.0.0 materializes to the target device in bf16 BEFORE
-                # the BnB quantization op runs. Load on CPU so weights are quantized to
-                # 4-bit on CPU; the caller then moves the 4-bit model to GPU.
-                init_kwargs["device_map"] = {"": "cpu"}
+                init_kwargs["device_map"] = {"": get_current_device()}  # change auto device map for inference
 
+            # transformers>=5.0 loads tensors to GPU in bf16 BEFORE BnB convert runs, which causes
+            # Params4bit.to(cuda) to be a no-op (already on cuda = no quantization). Patch: force
+            # tensors through CPU→CUDA so Params4bit quantization is triggered.
+            _patch_bnb4bit_convert_for_transformers5()
             logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with bitsandbytes.")
         elif model_args.quantization_method == QuantizationMethod.HQQ:
             if model_args.quantization_bit not in [8, 6, 5, 4, 3, 2, 1]:
@@ -253,3 +254,56 @@ def _bnb_uses_cpu_first_loading(model_args: "ModelArguments") -> bool:
         and not is_fsdp_enabled()
         and model_args.quantization_device_map != "auto"
     )
+
+
+def _patch_bnb4bit_convert_for_transformers5() -> None:
+    """Monkey-patch Bnb4bitQuantize.convert for transformers>=5.0 compatibility.
+
+    In transformers 5.0+, _materialize_copy() moves tensors to the target CUDA device in bf16
+    BEFORE the BnB quantize op runs. Params4bit.to(cuda) is then a no-op (already on cuda),
+    so no quantization happens and the model stays in bf16 → GPU OOM.
+
+    Fix: for each convert call, move CUDA tensors to CPU first so that Params4bit(cpu).to(cuda)
+    triggers proper 4-bit quantization.
+    """
+    try:
+        from transformers.integrations.bitsandbytes import Bnb4bitQuantize
+    except ImportError:
+        return  # transformers without BnB support
+
+    if getattr(Bnb4bitQuantize, "_bnb_cpu_fix_applied", False):
+        return  # already patched
+
+    _original_convert = Bnb4bitQuantize.convert
+
+    def _fixed_convert(self, input_dict, full_layer_name=None, model=None, **kwargs):
+        # Find target device from the first CUDA tensor in the input, then move all to CPU
+        original_device = None
+        fixed_dict = {}
+        for key, value in input_dict.items():
+            if isinstance(value, list):
+                cpu_list = []
+                for t in value:
+                    if isinstance(t, torch.Tensor) and t.is_cuda:
+                        if original_device is None:
+                            original_device = t.device
+                        cpu_list.append(t.cpu())
+                    else:
+                        cpu_list.append(t)
+                fixed_dict[key] = cpu_list
+            elif isinstance(value, torch.Tensor) and value.is_cuda:
+                if original_device is None:
+                    original_device = value.device
+                fixed_dict[key] = value.cpu()
+            else:
+                fixed_dict[key] = value
+
+        result = _original_convert(self, fixed_dict, full_layer_name=full_layer_name, model=model, **kwargs)
+
+        # Move resulting Params4bit tensors to the original CUDA device (triggers quantization)
+        if original_device is not None:
+            return {k: v.to(original_device) if hasattr(v, "to") else v for k, v in result.items()}
+        return result
+
+    Bnb4bitQuantize.convert = _fixed_convert
+    Bnb4bitQuantize._bnb_cpu_fix_applied = True
