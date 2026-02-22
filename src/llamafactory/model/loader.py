@@ -195,8 +195,37 @@ def load_model(
         from transformers.integrations import is_deepspeed_zero3_enabled
         from transformers.modeling_utils import is_fsdp_enabled
         if not is_deepspeed_zero3_enabled() and not is_fsdp_enabled():
-            logger.info_rank0("Moving BnB 4-bit model to GPU (triggers 4-bit quantization per-layer)...")
-            model = model.to(get_current_device())
+            import torch as _torch
+            _dev = get_current_device()
+            if _torch.cuda.is_available():
+                _mem_before = _torch.cuda.memory_allocated(_dev) / (1024**3)
+                logger.info_rank0(f"GPU memory before BnB move: {_mem_before:.2f} GiB allocated on {_dev}")
+            logger.info_rank0("Moving BnB 4-bit model to GPU (pre-quantized uint8 on CPU -> CUDA)...")
+            # Explicitly move each Params4bit first (bnb_quantized=True, moves uint8)
+            import bitsandbytes as _bnb
+            for _mod_name, _mod in model.named_modules():
+                for _attr in ("weight", "bias"):
+                    _p = getattr(_mod, _attr, None)
+                    if isinstance(_p, _bnb.nn.Params4bit):
+                        setattr(_mod, _attr, _p.to(_dev))
+            # Move all remaining non-quantized parameters in-place
+            for _p_name, _p in model.named_parameters():
+                if not isinstance(_p, _bnb.nn.Params4bit) and _p.device.type != str(_dev).split(":")[0]:
+                    _p.data = _p.data.to(_dev)
+            # Move all registered buffers
+            for _b_name, _buf in list(model.named_buffers()):
+                if _buf is not None and _buf.device.type != str(_dev).split(":")[0]:
+                    try:
+                        _parent = model
+                        _parts = _b_name.split(".")
+                        for _part in _parts[:-1]:
+                            _parent = getattr(_parent, _part)
+                        _parent.register_buffer(_parts[-1], _buf.to(_dev))
+                    except Exception:
+                        pass
+            if _torch.cuda.is_available():
+                _mem_after = _torch.cuda.memory_allocated(_dev) / (1024**3)
+                logger.info_rank0(f"GPU memory after BnB move: {_mem_after:.2f} GiB (delta +{_mem_after - _mem_before:.2f} GiB)")
 
     model = init_adapter(config, model, model_args, finetuning_args, is_trainable)
 
