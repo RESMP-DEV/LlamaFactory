@@ -1,0 +1,48 @@
+### model
+model_name_or_path: Qwen/Qwen3-Coder-Next-Base
+trust_remote_code: true
+quantization_bit: 4
+quantization_type: fp4
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+
+### dataset
+dataset: lilith_v0.2
+template: qwen3_nothink
+cutoff_len: 8192
+streaming: false
+max_samples: null
+dataloader_num_workers: 0
+preprocessing_num_workers: null
+
+### output
+output_dir: saves/qwen3-coder-next/lora/sft
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-4
+num_train_epochs: 3.0
+max_steps: 100
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+val_size: 1024
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 500

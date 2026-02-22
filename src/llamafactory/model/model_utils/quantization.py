@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from datasets import load_dataset
-from transformers import BitsAndBytesConfig, EetqConfig, GPTQConfig, HqqConfig
+from transformers import BitsAndBytesConfig, EetqConfig, FPQuantConfig, GPTQConfig, HqqConfig
+from transformers.utils import is_fp_quant_available
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import is_fsdp_enabled
 
@@ -189,7 +190,10 @@ def configure_quantization(
 
                 check_version("bitsandbytes>=0.43.0", mandatory=True)
             else:
-                init_kwargs["device_map"] = {"": get_current_device()}  # change auto device map for inference
+                # transformers>=5.0.0 materializes to the target device in bf16 BEFORE
+                # the BnB quantization op runs. Load on CPU so weights are quantized to
+                # 4-bit on CPU; the caller then moves the 4-bit model to GPU.
+                init_kwargs["device_map"] = {"": "cpu"}
 
             logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with bitsandbytes.")
         elif model_args.quantization_method == QuantizationMethod.HQQ:
@@ -214,3 +218,38 @@ def configure_quantization(
             check_version("eetq", mandatory=True)
             init_kwargs["quantization_config"] = EetqConfig()
             logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with EETQ.")
+
+    elif model_args.quantization_method == QuantizationMethod.FPQUANT:  # naive NVFP4 via fp_quant
+        if not is_fp_quant_available():
+            raise ImportError("`fp_quant` package is required for NVFP4 quantization. Run: pip install fp-quant")
+
+        if is_deepspeed_zero3_enabled() or is_fsdp_enabled():
+            raise ValueError("FPQUANT (NVFP4) is incompatible with DeepSpeed ZeRO-3 or FSDP.")
+
+        if model_args.nvfp4_group_size not in [16, 32, 64, 128]:
+            raise ValueError("`nvfp4_group_size` must be one of [16, 32, 64, 128].")
+
+        init_kwargs["quantization_config"] = FPQuantConfig(
+            forward_dtype="nvfp4",
+            forward_method="abs_max",
+            backward_dtype="bf16",
+            store_master_weights=False,  # base frozen; only LoRA adapters are trained
+            pseudoquantization=True,  # Hopper (SM90) lacks native FP4 compute; dequant to bf16
+            hadamard_group_size=model_args.nvfp4_group_size,
+        )
+        init_kwargs["device_map"] = {"" : get_current_device()}
+        logger.info_rank0(
+            f"Quantizing model to NVFP4 (fp_quant) with hadamard_group_size={model_args.nvfp4_group_size}. "
+            "Pseudoquantization enabled (Hopper SM90 — weights dequantized to bf16 for compute)."
+        )
+
+
+def _bnb_uses_cpu_first_loading(model_args: "ModelArguments") -> bool:
+    """Return True if BnB 4-bit was loaded to CPU first (transformers>=5.0 workaround)."""
+    return (
+        model_args.quantization_bit == 4
+        and getattr(model_args, "quantization_method", None) == QuantizationMethod.BNB
+        and not is_deepspeed_zero3_enabled()
+        and not is_fsdp_enabled()
+        and model_args.quantization_device_map != "auto"
+    )

@@ -295,6 +295,10 @@ class QuantizationArguments:
         default=None,
         metadata={"help": "Device map used to infer the 4-bit quantized model, needs bitsandbytes>=0.43.0."},
     )
+    nvfp4_group_size: int = field(
+        default=16,
+        metadata={"help": "Hadamard group size for NVFP4 quantization. Valid values: 16, 32, 64, 128."},
+    )
 
 
 @dataclass

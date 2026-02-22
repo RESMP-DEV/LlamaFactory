@@ -145,6 +145,7 @@ class QuantizationMethod(StrEnum):
     HQQ = "hqq"
     MXFP4 = "mxfp4"
     FP8 = "fp8"
+    FPQUANT = "fp_quant"
 
 
 class RopeScaling(StrEnum):

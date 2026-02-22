@@ -31,7 +31,7 @@ from transformers.training_args import ParallelMode
 from transformers.utils import is_torch_bf16_gpu_available, is_torch_npu_available
 
 from ..extras import logging
-from ..extras.constants import CHECKPOINT_NAMES, EngineName
+from ..extras.constants import CHECKPOINT_NAMES, EngineName, QuantizationMethod
 from ..extras.misc import check_dependencies, check_version, get_current_device, is_env_enabled
 from ..extras.packages import is_mcore_adapter_available, is_transformers_version_greater_than
 from .data_args import DataArguments
@@ -126,6 +126,10 @@ def _verify_model_args(
     if model_args.quantization_bit is not None:
         if finetuning_args.finetuning_type not in ["lora", "oft"]:
             raise ValueError("Quantization is only compatible with the LoRA or OFT method.")
+
+    if model_args.quantization_method == QuantizationMethod.FPQUANT and model_args.quantization_bit is None:
+        if finetuning_args.finetuning_type not in ["lora", "oft"]:
+            raise ValueError("FPQUANT (NVFP4) quantization is only compatible with the LoRA or OFT method.")
 
         if finetuning_args.pissa_init:
             raise ValueError("Please use scripts/pissa_init.py to initialize PiSSA for a quantized model.")

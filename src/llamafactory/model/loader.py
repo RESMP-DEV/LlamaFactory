@@ -178,6 +178,13 @@ def load_model(
                 model = load_class.from_pretrained(**init_kwargs)
                 if getattr(model.config, "model_type", None) in ["qwen2_5_omni", "qwen3_omni_moe"]:
                     model = getattr(model, "thinker")
+                # When BnB 4-bit is loaded to CPU first (transformers>=5.0 regression workaround),
+                # move the quantized model to the target CUDA device now.
+                from .model_utils.quantization import _bnb_uses_cpu_first_loading
+                if _bnb_uses_cpu_first_loading(model_args):
+                    from ..extras.misc import get_current_device
+                    logger.info_rank0("Moving BnB 4-bit model from CPU to CUDA after quantization.")
+                    model = model.to(get_current_device())
 
         if model_args.mixture_of_depths == "convert":
             model = convert_pretrained_model_to_mod(model, config, model_args)
