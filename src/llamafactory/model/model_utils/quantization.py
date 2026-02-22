@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from datasets import load_dataset
-from transformers import BitsAndBytesConfig, EetqConfig, FPQuantConfig, GPTQConfig, HqqConfig
-from transformers.utils import is_fp_quant_available
+from transformers import BitsAndBytesConfig, EetqConfig, GPTQConfig, HqqConfig
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import is_fsdp_enabled
 
@@ -190,13 +189,11 @@ def configure_quantization(
 
                 check_version("bitsandbytes>=0.43.0", mandatory=True)
             else:
-                init_kwargs["device_map"] = {"": get_current_device()}  # change auto device map for inference
-
-            # transformers>=5.0 loads tensors to GPU in bf16 BEFORE BnB convert runs, which causes
-            # Params4bit.to(cuda) to be a no-op (already on cuda = no quantization). Patch: force
-            # tensors through CPU→CUDA so Params4bit quantization is triggered.
-            _patch_bnb4bit_convert_for_transformers5()
-            logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with bitsandbytes.")
+                # CPU-first loading: tensors materialize to RAM in bf16, Params4bit built on CPU
+                # (unquantized). loader.py then calls model.to(cuda) which triggers
+                # Params4bit.to(cuda) -> 4-bit quantization per-layer, never exceeding VRAM.
+                init_kwargs["device_map"] = {"": "cpu"}
+            logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with bitsandbytes (CPU-first).")
         elif model_args.quantization_method == QuantizationMethod.HQQ:
             if model_args.quantization_bit not in [8, 6, 5, 4, 3, 2, 1]:
                 raise ValueError("HQQ only accepts 1/2/3/4/5/6/8-bit quantization.")
@@ -220,90 +217,13 @@ def configure_quantization(
             init_kwargs["quantization_config"] = EetqConfig()
             logger.info_rank0(f"Quantizing model to {model_args.quantization_bit} bit with EETQ.")
 
-    elif model_args.quantization_method == QuantizationMethod.FPQUANT:  # naive NVFP4 via fp_quant
-        if not is_fp_quant_available():
-            raise ImportError("`fp_quant` package is required for NVFP4 quantization. Run: pip install fp-quant")
 
-        if is_deepspeed_zero3_enabled() or is_fsdp_enabled():
-            raise ValueError("FPQUANT (NVFP4) is incompatible with DeepSpeed ZeRO-3 or FSDP.")
-
-        if model_args.nvfp4_group_size not in [16, 32, 64, 128]:
-            raise ValueError("`nvfp4_group_size` must be one of [16, 32, 64, 128].")
-
-        init_kwargs["quantization_config"] = FPQuantConfig(
-            forward_dtype="nvfp4",
-            forward_method="abs_max",
-            backward_dtype="bf16",
-            store_master_weights=False,  # base frozen; only LoRA adapters are trained
-            pseudoquantization=True,  # Hopper (SM90) lacks native FP4 compute; dequant to bf16
-            hadamard_group_size=model_args.nvfp4_group_size,
-        )
-        init_kwargs["device_map"] = {"" : get_current_device()}
-        logger.info_rank0(
-            f"Quantizing model to NVFP4 (fp_quant) with hadamard_group_size={model_args.nvfp4_group_size}. "
-            "Pseudoquantization enabled (Hopper SM90 — weights dequantized to bf16 for compute)."
-        )
-
-
-def _bnb_uses_cpu_first_loading(model_args: "ModelArguments") -> bool:
-    """Return True if BnB 4-bit was loaded to CPU first (transformers>=5.0 workaround)."""
+def _should_move_bnb_model_to_gpu(model_args: "ModelArguments") -> bool:
+    """Return True when BnB 4-bit CPU-first loading was used and the model needs .to(cuda)."""
     return (
-        model_args.quantization_bit == 4
+        getattr(model_args, "quantization_bit", None) == 4
         and getattr(model_args, "quantization_method", None) == QuantizationMethod.BNB
-        and not is_deepspeed_zero3_enabled()
-        and not is_fsdp_enabled()
-        and model_args.quantization_device_map != "auto"
+        and getattr(model_args, "quantization_device_map", None) != "auto"
     )
 
 
-def _patch_bnb4bit_convert_for_transformers5() -> None:
-    """Monkey-patch Bnb4bitQuantize.convert for transformers>=5.0 compatibility.
-
-    In transformers 5.0+, _materialize_copy() moves tensors to the target CUDA device in bf16
-    BEFORE the BnB quantize op runs. Params4bit.to(cuda) is then a no-op (already on cuda),
-    so no quantization happens and the model stays in bf16 → GPU OOM.
-
-    Fix: for each convert call, move CUDA tensors to CPU first so that Params4bit(cpu).to(cuda)
-    triggers proper 4-bit quantization.
-    """
-    try:
-        from transformers.integrations.bitsandbytes import Bnb4bitQuantize
-    except ImportError:
-        return  # transformers without BnB support
-
-    if getattr(Bnb4bitQuantize, "_bnb_cpu_fix_applied", False):
-        return  # already patched
-
-    _original_convert = Bnb4bitQuantize.convert
-
-    def _fixed_convert(self, input_dict, full_layer_name=None, model=None, **kwargs):
-        # Find target device from the first CUDA tensor in the input, then move all to CPU
-        original_device = None
-        fixed_dict = {}
-        for key, value in input_dict.items():
-            if isinstance(value, list):
-                cpu_list = []
-                for t in value:
-                    if isinstance(t, torch.Tensor) and t.is_cuda:
-                        if original_device is None:
-                            original_device = t.device
-                        cpu_list.append(t.cpu())
-                    else:
-                        cpu_list.append(t)
-                fixed_dict[key] = cpu_list
-            elif isinstance(value, torch.Tensor) and value.is_cuda:
-                if original_device is None:
-                    original_device = value.device
-                fixed_dict[key] = value.cpu()
-            else:
-                fixed_dict[key] = value
-
-        result = _original_convert(self, fixed_dict, full_layer_name=full_layer_name, model=model, **kwargs)
-
-        # Move resulting Params4bit tensors to the original CUDA device (triggers quantization)
-        if original_device is not None:
-            return {k: v.to(original_device) if hasattr(v, "to") else v for k, v in result.items()}
-        return result
-
-    Bnb4bitQuantize.convert = _fixed_convert
-    Bnb4bitQuantize._bnb_cpu_fix_applied = True

@@ -2,7 +2,9 @@
 model_name_or_path: Qwen/Qwen3-Coder-Next-Base
 trust_remote_code: true
 quantization_bit: 4
-quantization_type: fp4
+quantization_type: nf4
+double_quantization: true
+upcast_layernorm: true
 
 ### method
 stage: sft

@@ -70,6 +70,10 @@ def run_trial(
             "overwrite_output_dir": True,
             "report_to": "none",
             "save_steps": max_steps + 1,  # don't save intermediate checkpoints
+            # Ensure eval fires during the short trial window
+            "eval_strategy": "steps",
+            "eval_steps": max(10, max_steps // 5),
+            "val_size": min(config.get("val_size", 256), 256),
         }
     )
 

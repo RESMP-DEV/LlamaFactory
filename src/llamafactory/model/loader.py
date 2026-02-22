@@ -186,6 +186,18 @@ def load_model(
         patch_model(model, tokenizer, model_args, is_trainable, add_valuehead)
         register_autoclass(config, model, tokenizer)
 
+    # BnB 4-bit CPU-first loading (transformers>=5.0): model was loaded to CPU so that
+    # _materialize_copy never requires full bf16 VRAM. Calling .to(cuda) now triggers
+    # Params4bit.to(cuda) per-layer, which performs the actual 4-bit quantization.
+    from .model_utils.quantization import _should_move_bnb_model_to_gpu
+    if _should_move_bnb_model_to_gpu(model_args):
+        from ..extras.misc import get_current_device
+        from transformers.integrations import is_deepspeed_zero3_enabled
+        from transformers.modeling_utils import is_fsdp_enabled
+        if not is_deepspeed_zero3_enabled() and not is_fsdp_enabled():
+            logger.info_rank0("Moving BnB 4-bit model to GPU (triggers 4-bit quantization per-layer)...")
+            model = model.to(get_current_device())
+
     model = init_adapter(config, model, model_args, finetuning_args, is_trainable)
 
     if add_valuehead:

@@ -127,9 +127,6 @@ def _verify_model_args(
         if finetuning_args.finetuning_type not in ["lora", "oft"]:
             raise ValueError("Quantization is only compatible with the LoRA or OFT method.")
 
-    if model_args.quantization_method == QuantizationMethod.FPQUANT and model_args.quantization_bit is None:
-        if finetuning_args.finetuning_type not in ["lora", "oft"]:
-            raise ValueError("FPQUANT (NVFP4) quantization is only compatible with the LoRA or OFT method.")
 
         if finetuning_args.pissa_init:
             raise ValueError("Please use scripts/pissa_init.py to initialize PiSSA for a quantized model.")
