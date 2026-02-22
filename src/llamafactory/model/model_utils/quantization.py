@@ -279,79 +279,100 @@ def _quantize_qwen3next_experts(model: "torch.nn.Module", model_args: "ModelArgu
         logger.info_rank0(
             f"Quantized Qwen3NextExperts in {found} block(s) using BnB {bnb_cfg.upper()} "
             f"(double_quant={double_quant}). Expert weights are now 4-bit on GPU "
-            f"(2 dequant calls/layer + 1 cpu sync/layer via bincount; ~512x fewer syncs than per-expert .item())."
+            f"(2 dequant calls/layer + 2 bmm calls for all {N} experts; 1 cpu sync/layer)."
         )
 
 
 def _patch_qwen3next_experts_forward(module: "torch.nn.Module") -> None:
-    """Replace Qwen3NextExperts.forward with a sync-efficient batched-dequant version.
+    """Replace Qwen3NextExperts.forward with a fully-vectorized batched-matmul version.
 
-    Strategy:
-    - Dequantize ALL experts in 2 CUDA calls (gate_up + down).  With top-10 routing
-      over 512 experts and 4096 tokens, virtually all experts are active, so full
-      dequantization is cheaper than selective dequantization.
-    - Sort tokens by expert assignment, then use ONE cpu().tolist() sync per layer to
-      get per-expert token counts.  The inner loop uses Python-int indexing which never
-      triggers GPU→CPU sync.  This reduces blocking syncs from 512/layer to 1/layer
-      (~512× less synchronization overhead).
-    Peak extra VRAM: ~3 GiB per layer (held only during the layer's forward, then freed).
+    Strategy (zero Python loop over experts):
+    - Dequantize ALL experts in 2 CUDA calls (gate_up + down).
+    - Sort tokens by expert; compute within-expert positions on GPU.
+    - Pad into [N, max_count, I] and run TWO torch.bmm calls for all experts at once.
+    - ONE cpu() sync per layer (just max_count — a single integer).
+    - Scatter weighted outputs back to final token positions.
+
+    vs previous bincount loop:  OLD 512 serial F.linear calls → NEW 2 bmm calls.
+    Expected GPU utilisation: ~80 %+ vs previous ~27 %.
+    Peak extra VRAM: ~4–6 GiB per layer (freed after each layer's forward).
     """
-    import torch.nn.functional as F
     import bitsandbytes as bnb
 
     def quantized_forward(self, hidden_states, top_k_index, top_k_weights):
         device = hidden_states.device
         dtype = hidden_states.dtype
-        final_hidden_states = torch.zeros_like(hidden_states)
 
         # Move QuantState metadata to device on first call (in-place, idempotent).
         self._bnb_gate_up_proj_qs.to(device)
         self._bnb_down_proj_qs.to(device)
 
-        # Dequantize ALL experts at once — 2 CUDA kernel launches per layer.
-        N, O_gu, I = self._bnb_gate_up_proj_shape   # (num_experts, out, in)
+        # ── Dequantize all experts — 2 CUDA launches total ───────────────────
+        N, O_gu, I = self._bnb_gate_up_proj_shape    # [N, 2*d_expert, d_model]
         gate_up_all = bnb.functional.dequantize_4bit(
             self._bnb_gate_up_proj_quant, self._bnb_gate_up_proj_qs
-        ).to(dtype).view(N, O_gu, I)  # [num_experts, out, in]
+        ).to(dtype).view(N, O_gu, I)
 
-        _, O_dn, I_dn = self._bnb_down_proj_shape
+        _, O_dn, I_dn = self._bnb_down_proj_shape    # [N, d_model, d_expert]
         down_all = bnb.functional.dequantize_4bit(
             self._bnb_down_proj_quant, self._bnb_down_proj_qs
-        ).to(dtype).view(N, O_dn, I_dn)  # [num_experts, out, in]
+        ).to(dtype).view(N, O_dn, I_dn)
 
-        # Build flat (token, expert, weight) view of the top-k routing table.
+        # ── Flat routing view ────────────────────────────────────────────────
         seq_len, top_k = top_k_index.shape
-        flat_expert_ids = top_k_index.view(-1)                              # [seq*top_k]
-        flat_token_ids = (
+        total = seq_len * top_k
+        flat_expert_ids = top_k_index.view(-1)                              # [total]
+        flat_token_ids  = (
             torch.arange(seq_len, device=device)
-            .unsqueeze(1).expand(-1, top_k).reshape(-1)                     # [seq*top_k]
+            .unsqueeze(1).expand(-1, top_k).reshape(-1)                     # [total]
         )
-        flat_weights = top_k_weights.view(-1)                               # [seq*top_k]
+        flat_weights = top_k_weights.view(-1).to(dtype)                     # [total], cast to match hidden dtype
 
-        # Sort by expert so all activations for the same expert are contiguous.
-        sort_idx = flat_expert_ids.argsort(stable=True)                     # GPU sort, no CPU sync
-        sorted_expert_ids = flat_expert_ids[sort_idx]
-        sorted_token_ids  = flat_token_ids[sort_idx]
-        sorted_weights    = flat_weights[sort_idx]
+        # Sort all (token→expert) pairs by expert for contiguous memory access.
+        sort_idx          = flat_expert_ids.argsort(stable=True)            # GPU, no sync
+        sorted_expert_ids = flat_expert_ids[sort_idx]                       # [total]
+        sorted_token_ids  = flat_token_ids[sort_idx]                        # [total]
+        sorted_weights    = flat_weights[sort_idx]                          # [total]
 
-        # ONE CPU↔GPU sync for all 512 expert counts at once (vs 512 per-expert syncs).
-        counts = sorted_expert_ids.bincount(minlength=N).cpu().tolist()
+        # Per-expert counts [N] and exclusive-prefix offsets [N] — pure GPU ops.
+        counts  = sorted_expert_ids.bincount(minlength=N)                   # [N], GPU
+        offsets = torch.cat([
+            torch.zeros(1, dtype=torch.long, device=device),
+            counts.cumsum(0)[:-1],
+        ])                                                                  # [N], GPU
 
-        offset = 0
-        for e_id, count in enumerate(counts):                               # Python int, no sync
-            if count == 0:
-                offset += count
-                continue
-            tok_ids  = sorted_token_ids[offset : offset + count]            # slice, no sync
-            e_hidden = hidden_states[tok_ids]                               # GPU gather
-            # Python-int indexing into pre-dequantized tensors — no GPU sync.
-            gate, up = F.linear(e_hidden, gate_up_all[e_id]).chunk(2, dim=-1)
-            out = F.linear(self.act_fn(gate) * up, down_all[e_id])
-            out = out * sorted_weights[offset : offset + count].unsqueeze(-1)
-            final_hidden_states.index_add_(0, tok_ids, out.to(dtype))
-            offset += count
+        # ONE sync: transfer a single integer (max tokens routed to any one expert).
+        max_count = int(counts.max().item())
+        if max_count == 0:
+            return torch.zeros_like(hidden_states)
 
-        return final_hidden_states
+        # Within-expert position for every activation — pure GPU indexing.
+        act_global = torch.arange(total, device=device)                     # [total]
+        within     = act_global - offsets[sorted_expert_ids]               # [total]
+
+        # ── Gather: build padded input [N, max_count, I] ─────────────────────
+        padded_in = hidden_states.new_zeros(N, max_count, I)
+        padded_in[sorted_expert_ids, within] = hidden_states[sorted_token_ids]
+
+        # ── TWO batched matmuls replace the 512-expert Python loop ────────────
+        # gate_up: [N, max_count, I] × [N, I, O_gu] → [N, max_count, O_gu]
+        gate_up = torch.bmm(padded_in, gate_up_all.permute(0, 2, 1))
+        gate, up = gate_up.chunk(2, dim=-1)                                 # [N, max_count, d_expert]
+        mid = self.act_fn(gate) * up
+
+        # down:    [N, max_count, d_expert] × [N, d_expert, d_model] → [N, max_count, d_model]
+        out = torch.bmm(mid, down_all.permute(0, 2, 1))
+
+        # ── Apply routing weights ─────────────────────────────────────────────
+        padded_w = hidden_states.new_zeros(N, max_count)
+        padded_w[sorted_expert_ids, within] = sorted_weights
+        out = out * padded_w.unsqueeze(-1)                                  # [N, max_count, I_dn]
+
+        # ── Scatter-add to final output [seq_len, hidden_size] ───────────────
+        final = torch.zeros_like(hidden_states)
+        final.index_add_(0, sorted_token_ids, out[sorted_expert_ids, within])
+
+        return final
 
     import types
     module.forward = types.MethodType(quantized_forward, module)
