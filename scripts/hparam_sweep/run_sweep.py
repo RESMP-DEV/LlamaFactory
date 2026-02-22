@@ -71,7 +71,8 @@ def run_trial(
             "output_dir": trial_dir,
             "max_steps": max_steps,
             "overwrite_output_dir": True,
-            "report_to": "none",
+            "report_to": "wandb",
+            "run_name": f"sweep-trial-{trial_index:03d}",
             "save_steps": max_steps + 1,  # don't save intermediate checkpoints
             # Ensure eval fires during the short trial window
             "eval_strategy": "steps",

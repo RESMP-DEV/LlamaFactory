@@ -740,7 +740,7 @@
     "folder": "python"
   },
   "lilith_v0.2": {
-    "file_name": "lilith_v0.2",
+    "file_name": "lilith_v0.2_merged.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
