@@ -30,6 +30,7 @@ def launch_final_training(
     base_yaml: str,
     best_params: dict,
     output_dir: str,
+    accelerate_config: str | None = None,
     train_epochs: float = 3.0,
 ) -> None:
     """Run full training with best hyperparameters from sweep."""
@@ -87,7 +88,18 @@ def launch_final_training(
     env["PYTHONPATH"] = f"{Path(root) / 'src'}:{env.get('PYTHONPATH', '')}"
 
     python = sys.executable
-    cmd = [python, "-m", "llamafactory.cli", "train", final_yaml]
+    if accelerate_config is not None:
+        accelerate = str(Path(sys.executable).parent / "accelerate")
+        cmd = [
+            accelerate,
+            "launch",
+            "--config_file",
+            accelerate_config,
+            "src/train.py",
+            final_yaml,
+        ]
+    else:
+        cmd = [python, "-m", "llamafactory.cli", "train", final_yaml]
     log_path = os.path.join(output_dir, "final_train.log")
 
     print(f"\n[Final Training] Config: {final_yaml}")
@@ -128,6 +140,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir", default="saves/qwen3-coder-next/sweep_run", help="Root output dir")
+    parser.add_argument(
+        "--accelerate-config",
+        type=str,
+        default=None,
+        help="Optional Accelerate config YAML. If provided, both sweep and final run use `accelerate launch`.",
+    )
     parser.add_argument("--train-epochs", type=float,
                         default=3.0, help="Epochs for final training")
     parser.add_argument("--max-steps-per-trial", type=int,
@@ -151,6 +169,7 @@ def main() -> None:
             base_yaml=args.config,
             output_dir=sweep_dir,
             preset=args.preset,
+            accelerate_config=args.accelerate_config,
             num_trials=args.num_trials,
             num_initial=args.num_initial,
             max_steps_per_trial=args.max_steps_per_trial,
@@ -165,6 +184,7 @@ def main() -> None:
         base_yaml=args.config,
         best_params=best_params,
         output_dir=final_dir,
+        accelerate_config=args.accelerate_config,
         train_epochs=args.train_epochs,
     )
     print("\n[Pipeline] Pipeline complete!")

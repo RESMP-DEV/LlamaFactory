@@ -10,7 +10,8 @@ finetuning_type: full
 ### dataset
 dataset: lilith_v0_2
 template: qwen3_nothink
-cutoff_len: 2048
+cutoff_len: 1024
+max_samples: 20000
 preprocessing_num_workers: null
 preprocessing_batch_size: 1
 dataloader_num_workers: 0

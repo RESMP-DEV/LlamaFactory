@@ -85,6 +85,7 @@ def run_trial(
     params: dict[str, Any],
     base_yaml: str,
     output_dir: str,
+    accelerate_config: str | None = None,
     max_steps: int = 100,
 ) -> float:
     """Launch a single training trial and return eval loss."""
@@ -151,7 +152,18 @@ def run_trial(
     env["PYTHONPATH"] = f"{project_root / 'src'}:{env.get('PYTHONPATH', '')}"
 
     python = sys.executable
-    cmd = [python, "-m", "llamafactory.cli", "train", trial_yaml]
+    if accelerate_config is not None:
+        accelerate = str(Path(sys.executable).parent / "accelerate")
+        cmd = [
+            accelerate,
+            "launch",
+            "--config_file",
+            accelerate_config,
+            "src/train.py",
+            trial_yaml,
+        ]
+    else:
+        cmd = [python, "-m", "llamafactory.cli", "train", trial_yaml]
     log_path = os.path.join(trial_dir, "train.log")
 
     print(f"\n[Trial {trial_index}] Starting with params: {params}")
@@ -218,6 +230,7 @@ def run_bayesian_sweep(
     base_yaml: str,
     output_dir: str,
     preset: str = "auto",
+    accelerate_config: str | None = None,
     num_trials: int = 10,
     num_initial: int = 4,
     max_steps_per_trial: int = 100,
@@ -250,6 +263,7 @@ def run_bayesian_sweep(
             params=params,
             base_yaml=base_yaml,
             output_dir=output_dir,
+            accelerate_config=accelerate_config,
             max_steps=max_steps_per_trial,
         )
         client.complete_trial(trial_index=trial_index,
@@ -297,6 +311,12 @@ if __name__ == "__main__":
                         help="Total number of trials")
     parser.add_argument("--num-initial", type=int, default=4,
                         help="Sobol initialization trials")
+    parser.add_argument(
+        "--accelerate-config",
+        type=str,
+        default=None,
+        help="Optional Accelerate config YAML. If provided, trials run via `accelerate launch`.",
+    )
     parser.add_argument("--max-steps", type=int,
                         default=100, help="Steps per trial")
     args = parser.parse_args()
@@ -305,6 +325,7 @@ if __name__ == "__main__":
         base_yaml=args.config,
         output_dir=args.output_dir,
         preset=args.preset,
+        accelerate_config=args.accelerate_config,
         num_trials=args.num_trials,
         num_initial=args.num_initial,
         max_steps_per_trial=args.max_steps,

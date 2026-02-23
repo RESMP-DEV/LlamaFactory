@@ -10,11 +10,12 @@ finetuning_type: full
 ### dataset
 dataset: lilith_v0_2
 template: qwen3_nothink
-cutoff_len: 2048
+cutoff_len: 1024
+max_samples: 10000
 preprocessing_num_workers: null
 preprocessing_batch_size: 1
 dataloader_num_workers: 0
-val_size: 64
+val_size: 32
 
 ### output
 output_dir: saves/qwen3-coder-next/full/sft-fp8-te-smoke
