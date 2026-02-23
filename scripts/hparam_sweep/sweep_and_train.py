@@ -45,9 +45,14 @@ def launch_final_training(
         "output_dir": output_dir,
         "num_train_epochs": train_epochs,
         "max_steps": -1,
+        "cutoff_len": min(int(config.get("cutoff_len", 4096)), 4096),
+        "preprocessing_num_workers": None,
+        "dataloader_num_workers": 0,
         "overwrite_output_dir": True,
         "save_steps": 500,
-        "report_to": "none",
+        "report_to": "wandb",
+        "bf16": True,
+        "fp16": False,
     }
 
     if "lora_rank" in best_params:
@@ -69,12 +74,20 @@ def launch_final_training(
             "TOKENIZERS_PARALLELISM": "false",
             "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=524288",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+            "FORCE_TORCHRUN": "1",
+            "DISABLE_VERSION_CHECK": "1",
+            "NPROC_PER_NODE": os.getenv("NPROC_PER_NODE", "1"),
+            "OMP_NUM_THREADS": "1",
         }
     )
+    root = str(Path(__file__).resolve().parents[2])
+    venv_bin = str(Path(sys.executable).parent)
+    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    env["PYTHONPATH"] = f"{Path(root) / 'src'}:{env.get('PYTHONPATH', '')}"
 
     python = sys.executable
-    cmd = [python, "src/train.py", final_yaml]
-    root = str(Path(__file__).resolve().parents[2])
+    cmd = [python, "-m", "llamafactory.cli", "train", final_yaml]
     log_path = os.path.join(output_dir, "final_train.log")
 
     print(f"\n[Final Training] Config: {final_yaml}")

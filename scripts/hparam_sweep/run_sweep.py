@@ -39,20 +39,22 @@ LORA_PARAMETERS = [
     RangeParameterConfig(name="weight_decay", bounds=(
         0.0, 0.1), parameter_type="float"),
     ChoiceParameterConfig(name="per_device_train_batch_size", values=[
-                          1, 2, 4], parameter_type="int", is_ordered=True),
+                          1], parameter_type="int", is_ordered=True),
     RangeParameterConfig(name="gradient_accumulation_steps",
                          bounds=(2, 16), parameter_type="int"),
 ]
 
 FULL_PARAMETERS = [
     RangeParameterConfig(name="learning_rate", bounds=(
-        1e-6, 2e-5), parameter_type="float", scaling="log"),
+        5e-6, 5e-5), parameter_type="float", scaling="log"),
+    ChoiceParameterConfig(name="lr_scheduler_type", values=[
+                          "cosine", "linear"], parameter_type="str", is_ordered=False),
     RangeParameterConfig(name="warmup_ratio", bounds=(
-        0.01, 0.15), parameter_type="float"),
+        0.03, 0.2), parameter_type="float"),
     RangeParameterConfig(name="weight_decay", bounds=(
-        0.0, 0.1), parameter_type="float"),
+        0.0, 0.2), parameter_type="float"),
     ChoiceParameterConfig(name="per_device_train_batch_size", values=[
-                          1, 2], parameter_type="int", is_ordered=True),
+                          1], parameter_type="int", is_ordered=True),
     RangeParameterConfig(name="gradient_accumulation_steps",
                          bounds=(1, 16), parameter_type="int"),
 ]
@@ -101,13 +103,18 @@ def run_trial(
         "gradient_accumulation_steps": int(params["gradient_accumulation_steps"]),
         "output_dir": trial_dir,
         "max_steps": max_steps,
+        "cutoff_len": min(int(config.get("cutoff_len", 4096)), 4096),
+        "preprocessing_num_workers": None,
+        "dataloader_num_workers": 0,
         "overwrite_output_dir": True,
-        "report_to": "none",
+        "report_to": "wandb",
         "run_name": f"sweep-trial-{trial_index:03d}",
         "save_steps": max_steps + 1,
         "eval_strategy": "steps",
         "eval_steps": max(10, max_steps // 5),
         "val_size": min(int(config.get("val_size", 256)), 256),
+        "bf16": True,
+        "fp16": False,
     }
 
     if "lora_rank" in params:
@@ -115,6 +122,9 @@ def run_trial(
 
     if "lora_dropout" in params:
         trial_overrides["lora_dropout"] = params["lora_dropout"]
+
+    if "lr_scheduler_type" in params:
+        trial_overrides["lr_scheduler_type"] = params["lr_scheduler_type"]
 
     config.update(trial_overrides)
 
@@ -128,11 +138,20 @@ def run_trial(
             "TOKENIZERS_PARALLELISM": "false",
             "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=524288",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+            "FORCE_TORCHRUN": "1",
+            "DISABLE_VERSION_CHECK": "1",
+            "NPROC_PER_NODE": os.getenv("NPROC_PER_NODE", "1"),
+            "OMP_NUM_THREADS": "1",
         }
     )
+    project_root = Path(__file__).resolve().parents[2]
+    venv_bin = str(Path(sys.executable).parent)
+    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    env["PYTHONPATH"] = f"{project_root / 'src'}:{env.get('PYTHONPATH', '')}"
 
     python = sys.executable
-    cmd = [python, "src/train.py", trial_yaml]
+    cmd = [python, "-m", "llamafactory.cli", "train", trial_yaml]
     log_path = os.path.join(trial_dir, "train.log")
 
     print(f"\n[Trial {trial_index}] Starting with params: {params}")
@@ -143,7 +162,7 @@ def run_trial(
     with open(log_path, "w") as log_f:
         proc = subprocess.run(
             cmd,
-            cwd=str(Path(__file__).resolve().parents[2]),  # LlamaFactory root
+            cwd=str(project_root),  # LlamaFactory root
             env=env,
             stdout=log_f,
             stderr=subprocess.STDOUT,

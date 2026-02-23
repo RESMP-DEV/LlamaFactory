@@ -749,7 +749,7 @@
       "role_tag": "from",
       "content_tag": "value",
       "user_tag": "human",
-      "assistant_tag": "assistant",
+      "assistant_tag": "gpt",
       "system_tag": "system"
     }
   }
