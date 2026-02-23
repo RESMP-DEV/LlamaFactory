@@ -27,21 +27,55 @@ from ax.api.client import Client
 from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
 
 
-# ---------------------------------------------------------------------------
-# Parameter space (new-style config objects)
-# ---------------------------------------------------------------------------
-
-# Note: LR upper bound raised to 1e-3 — base models benefit from higher LRs for initial chat format learning.
-# lora_rank extended to 128 — base→chat SFT needs higher rank to capture behavioral patterns.
-PARAMETERS = [
-    RangeParameterConfig(name="learning_rate", bounds=(1e-5, 1e-3), parameter_type="float", scaling="log"),
-    ChoiceParameterConfig(name="lora_rank", values=[8, 16, 32, 64, 128], parameter_type="int", is_ordered=True),
-    RangeParameterConfig(name="lora_dropout", bounds=(0.0, 0.1), parameter_type="float"),
-    RangeParameterConfig(name="warmup_ratio", bounds=(0.03, 0.15), parameter_type="float"),
-    RangeParameterConfig(name="weight_decay", bounds=(0.0, 0.1), parameter_type="float"),
-    ChoiceParameterConfig(name="per_device_train_batch_size", values=[1, 2, 4], parameter_type="int", is_ordered=True),
-    RangeParameterConfig(name="gradient_accumulation_steps", bounds=(2, 16), parameter_type="int"),
+LORA_PARAMETERS = [
+    RangeParameterConfig(name="learning_rate", bounds=(
+        1e-5, 1e-3), parameter_type="float", scaling="log"),
+    ChoiceParameterConfig(name="lora_rank", values=[
+                          8, 16, 32, 64, 128], parameter_type="int", is_ordered=True),
+    RangeParameterConfig(name="lora_dropout", bounds=(
+        0.0, 0.1), parameter_type="float"),
+    RangeParameterConfig(name="warmup_ratio", bounds=(
+        0.03, 0.15), parameter_type="float"),
+    RangeParameterConfig(name="weight_decay", bounds=(
+        0.0, 0.1), parameter_type="float"),
+    ChoiceParameterConfig(name="per_device_train_batch_size", values=[
+                          1, 2, 4], parameter_type="int", is_ordered=True),
+    RangeParameterConfig(name="gradient_accumulation_steps",
+                         bounds=(2, 16), parameter_type="int"),
 ]
+
+FULL_PARAMETERS = [
+    RangeParameterConfig(name="learning_rate", bounds=(
+        1e-6, 2e-5), parameter_type="float", scaling="log"),
+    RangeParameterConfig(name="warmup_ratio", bounds=(
+        0.01, 0.15), parameter_type="float"),
+    RangeParameterConfig(name="weight_decay", bounds=(
+        0.0, 0.1), parameter_type="float"),
+    ChoiceParameterConfig(name="per_device_train_batch_size", values=[
+                          1, 2], parameter_type="int", is_ordered=True),
+    RangeParameterConfig(name="gradient_accumulation_steps",
+                         bounds=(1, 16), parameter_type="int"),
+]
+
+
+def _detect_preset(base_yaml: str, preset: str) -> str:
+    if preset != "auto":
+        return preset
+
+    with open(base_yaml) as f:
+        config = yaml.safe_load(f)
+
+    if config.get("finetuning_type") == "full":
+        return "full"
+
+    return "lora"
+
+
+def _get_parameters_by_preset(preset: str):
+    if preset == "full":
+        return FULL_PARAMETERS
+
+    return LORA_PARAMETERS
 
 
 def run_trial(
@@ -59,27 +93,30 @@ def run_trial(
     with open(base_yaml) as f:
         config = yaml.safe_load(f)
 
-    config.update(
-        {
-            "learning_rate": params["learning_rate"],
-            "lora_rank": int(params["lora_rank"]),
-            "lora_dropout": params.get("lora_dropout", 0.0),
-            "warmup_ratio": params["warmup_ratio"],
-            "weight_decay": params["weight_decay"],
-            "per_device_train_batch_size": int(params["per_device_train_batch_size"]),
-            "gradient_accumulation_steps": int(params["gradient_accumulation_steps"]),
-            "output_dir": trial_dir,
-            "max_steps": max_steps,
-            "overwrite_output_dir": True,
-            "report_to": "wandb",
-            "run_name": f"sweep-trial-{trial_index:03d}",
-            "save_steps": max_steps + 1,  # don't save intermediate checkpoints
-            # Ensure eval fires during the short trial window
-            "eval_strategy": "steps",
-            "eval_steps": max(10, max_steps // 5),
-            "val_size": min(config.get("val_size", 256), 256),
-        }
-    )
+    trial_overrides = {
+        "learning_rate": params["learning_rate"],
+        "warmup_ratio": params["warmup_ratio"],
+        "weight_decay": params["weight_decay"],
+        "per_device_train_batch_size": int(params["per_device_train_batch_size"]),
+        "gradient_accumulation_steps": int(params["gradient_accumulation_steps"]),
+        "output_dir": trial_dir,
+        "max_steps": max_steps,
+        "overwrite_output_dir": True,
+        "report_to": "none",
+        "run_name": f"sweep-trial-{trial_index:03d}",
+        "save_steps": max_steps + 1,
+        "eval_strategy": "steps",
+        "eval_steps": max(10, max_steps // 5),
+        "val_size": min(int(config.get("val_size", 256)), 256),
+    }
+
+    if "lora_rank" in params:
+        trial_overrides["lora_rank"] = int(params["lora_rank"])
+
+    if "lora_dropout" in params:
+        trial_overrides["lora_dropout"] = params["lora_dropout"]
+
+    config.update(trial_overrides)
 
     trial_yaml = os.path.join(trial_dir, "config.yaml")
     with open(trial_yaml, "w") as f:
@@ -113,16 +150,19 @@ def run_trial(
         )
 
     elapsed = time.time() - start
-    print(f"[Trial {trial_index}] Finished in {elapsed:.1f}s (exit code {proc.returncode})")
+    print(
+        f"[Trial {trial_index}] Finished in {elapsed:.1f}s (exit code {proc.returncode})")
 
     if proc.returncode != 0:
-        print(f"[Trial {trial_index}] FAILED — returning high loss sentinel 99.0")
+        print(
+            f"[Trial {trial_index}] FAILED — returning high loss sentinel 99.0")
         return 99.0
 
     # Parse eval loss from trainer_state.json
     state_path = os.path.join(trial_dir, "trainer_state.json")
     if not os.path.exists(state_path):
-        print(f"[Trial {trial_index}] trainer_state.json not found — returning sentinel 99.0")
+        print(
+            f"[Trial {trial_index}] trainer_state.json not found — returning sentinel 99.0")
         return 99.0
 
     with open(state_path) as f:
@@ -144,7 +184,8 @@ def run_trial(
         ]
         if train_losses:
             loss = train_losses[-1]
-            print(f"[Trial {trial_index}] No eval loss found; using last train loss {loss:.4f}")
+            print(
+                f"[Trial {trial_index}] No eval loss found; using last train loss {loss:.4f}")
             return loss
         print(f"[Trial {trial_index}] No loss found — returning sentinel 99.0")
         return 99.0
@@ -157,21 +198,29 @@ def run_trial(
 def run_bayesian_sweep(
     base_yaml: str,
     output_dir: str,
+    preset: str = "auto",
     num_trials: int = 10,
     num_initial: int = 4,
     max_steps_per_trial: int = 100,
 ) -> dict[str, Any]:
     """Run Bayesian sweep with Sobol initialization + BoTorch optimization."""
+    resolved_preset = _detect_preset(base_yaml=base_yaml, preset=preset)
+    parameters = _get_parameters_by_preset(resolved_preset)
+
+    experiment_name = f"{Path(base_yaml).stem}_{resolved_preset}_sweep"
     client = Client()
     client.configure_experiment(
-        name="qwen3_coder_next_lora_sweep",
-        parameters=PARAMETERS,
+        name=experiment_name,
+        parameters=parameters,
     )
     client.configure_optimization(objective="-eval_loss")
     client.configure_generation_strategy(
         method="quality",
         initialization_budget=num_initial,
     )
+
+    print(f"[Sweep] Preset: {resolved_preset}")
+    print(f"[Sweep] Search parameters: {[p.name for p in parameters]}")
 
     results = []
     for trial_i in range(num_trials):
@@ -184,9 +233,12 @@ def run_bayesian_sweep(
             output_dir=output_dir,
             max_steps=max_steps_per_trial,
         )
-        client.complete_trial(trial_index=trial_index, raw_data={"eval_loss": loss})
-        results.append({"trial_index": trial_index, "params": dict(params), "eval_loss": loss})
-        print(f"\n[Sweep] Trial {trial_i + 1}/{num_trials} done. Loss={loss:.4f}")
+        client.complete_trial(trial_index=trial_index,
+                              raw_data={"eval_loss": loss})
+        results.append({"trial_index": trial_index,
+                       "params": dict(params), "eval_loss": loss})
+        print(
+            f"\n[Sweep] Trial {trial_i + 1}/{num_trials} done. Loss={loss:.4f}")
 
     best_params, values, best_trial_index, arm_name = client.get_best_parameterization()
     print(f"\n[Sweep] Best params (trial {best_trial_index}): {best_params}")
@@ -210,17 +262,30 @@ def run_bayesian_sweep(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run Bayesian hyperparameter sweep")
-    parser.add_argument("--config", required=True, help="Base training YAML config")
-    parser.add_argument("--output-dir", required=True, help="Directory for trial outputs")
-    parser.add_argument("--num-trials", type=int, default=10, help="Total number of trials")
-    parser.add_argument("--num-initial", type=int, default=4, help="Sobol initialization trials")
-    parser.add_argument("--max-steps", type=int, default=100, help="Steps per trial")
+    parser = argparse.ArgumentParser(
+        description="Run Bayesian hyperparameter sweep")
+    parser.add_argument("--config", required=True,
+                        help="Base training YAML config")
+    parser.add_argument("--output-dir", required=True,
+                        help="Directory for trial outputs")
+    parser.add_argument(
+        "--preset",
+        choices=["auto", "lora", "full"],
+        default="auto",
+        help="Search space preset. auto detects from finetuning_type in config.",
+    )
+    parser.add_argument("--num-trials", type=int, default=10,
+                        help="Total number of trials")
+    parser.add_argument("--num-initial", type=int, default=4,
+                        help="Sobol initialization trials")
+    parser.add_argument("--max-steps", type=int,
+                        default=100, help="Steps per trial")
     args = parser.parse_args()
 
     best = run_bayesian_sweep(
         base_yaml=args.config,
         output_dir=args.output_dir,
+        preset=args.preset,
         num_trials=args.num_trials,
         num_initial=args.num_initial,
         max_steps_per_trial=args.max_steps,

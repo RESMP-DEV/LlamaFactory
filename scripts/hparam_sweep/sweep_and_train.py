@@ -36,23 +36,27 @@ def launch_final_training(
     with open(base_yaml) as f:
         config = yaml.safe_load(f)
 
-    config.update(
-        {
-            "learning_rate": best_params["learning_rate"],
-            "lora_rank": int(best_params["lora_rank"]),
-            "lora_dropout": best_params.get("lora_dropout", 0.0),
-            "warmup_ratio": best_params["warmup_ratio"],
-            "weight_decay": best_params["weight_decay"],
-            "per_device_train_batch_size": int(best_params["per_device_train_batch_size"]),
-            "gradient_accumulation_steps": int(best_params["gradient_accumulation_steps"]),
-            "output_dir": output_dir,
-            "num_train_epochs": train_epochs,
-            "max_steps": -1,  # full run
-            "overwrite_output_dir": True,
-            "save_steps": 500,
-            "report_to": "none",
-        }
-    )
+    final_overrides = {
+        "learning_rate": best_params["learning_rate"],
+        "warmup_ratio": best_params["warmup_ratio"],
+        "weight_decay": best_params["weight_decay"],
+        "per_device_train_batch_size": int(best_params["per_device_train_batch_size"]),
+        "gradient_accumulation_steps": int(best_params["gradient_accumulation_steps"]),
+        "output_dir": output_dir,
+        "num_train_epochs": train_epochs,
+        "max_steps": -1,
+        "overwrite_output_dir": True,
+        "save_steps": 500,
+        "report_to": "none",
+    }
+
+    if "lora_rank" in best_params:
+        final_overrides["lora_rank"] = int(best_params["lora_rank"])
+
+    if "lora_dropout" in best_params:
+        final_overrides["lora_dropout"] = best_params["lora_dropout"]
+
+    config.update(final_overrides)
 
     final_yaml = os.path.join(output_dir, "final_config.yaml")
     os.makedirs(output_dir, exist_ok=True)
@@ -88,7 +92,8 @@ def launch_final_training(
         )
 
     if proc.returncode != 0:
-        print(f"[Final Training] FAILED with exit code {proc.returncode}. Check {log_path}")
+        print(
+            f"[Final Training] FAILED with exit code {proc.returncode}. Check {log_path}")
         sys.exit(1)
 
     print(f"[Final Training] Complete! Model saved to {output_dir}")
@@ -96,13 +101,26 @@ def launch_final_training(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sweep + train pipeline")
-    parser.add_argument("--config", required=True, help="Base training YAML config")
-    parser.add_argument("--num-trials", type=int, default=8, help="Sweep trials")
-    parser.add_argument("--num-initial", type=int, default=3, help="Sobol initialization trials")
-    parser.add_argument("--output-dir", default="saves/qwen3-coder-next/sweep_run", help="Root output dir")
-    parser.add_argument("--train-epochs", type=float, default=3.0, help="Epochs for final training")
-    parser.add_argument("--max-steps-per-trial", type=int, default=100, help="Steps per sweep trial")
-    parser.add_argument("--skip-sweep", action="store_true", help="Skip sweep; load best_params.json")
+    parser.add_argument("--config", required=True,
+                        help="Base training YAML config")
+    parser.add_argument("--num-trials", type=int,
+                        default=8, help="Sweep trials")
+    parser.add_argument("--num-initial", type=int, default=3,
+                        help="Sobol initialization trials")
+    parser.add_argument(
+        "--preset",
+        choices=["auto", "lora", "full"],
+        default="auto",
+        help="Search space preset. auto detects from finetuning_type in config.",
+    )
+    parser.add_argument(
+        "--output-dir", default="saves/qwen3-coder-next/sweep_run", help="Root output dir")
+    parser.add_argument("--train-epochs", type=float,
+                        default=3.0, help="Epochs for final training")
+    parser.add_argument("--max-steps-per-trial", type=int,
+                        default=100, help="Steps per sweep trial")
+    parser.add_argument("--skip-sweep", action="store_true",
+                        help="Skip sweep; load best_params.json")
     args = parser.parse_args()
 
     sweep_dir = os.path.join(args.output_dir, "sweep")
@@ -110,7 +128,8 @@ def main() -> None:
     best_params_path = os.path.join(sweep_dir, "best_params.json")
 
     if args.skip_sweep:
-        print("[Pipeline] Skipping sweep; loading best params from", best_params_path)
+        print("[Pipeline] Skipping sweep; loading best params from",
+              best_params_path)
         with open(best_params_path) as f:
             best_params = json.load(f)
     else:
@@ -118,6 +137,7 @@ def main() -> None:
         best_params = run_bayesian_sweep(
             base_yaml=args.config,
             output_dir=sweep_dir,
+            preset=args.preset,
             num_trials=args.num_trials,
             num_initial=args.num_initial,
             max_steps_per_trial=args.max_steps_per_trial,

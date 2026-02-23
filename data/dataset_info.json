@@ -739,8 +739,8 @@
     },
     "folder": "python"
   },
-  "lilith_v0.2": {
-    "file_name": "lilith_v0.2_merged.jsonl",
+  "lilith_v0_2": {
+    "hf_hub_url": "EVA-UNIT-01/Lilith-v0.2",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations"
@@ -749,7 +749,7 @@
       "role_tag": "from",
       "content_tag": "value",
       "user_tag": "human",
-      "assistant_tag": "gpt",
+      "assistant_tag": "assistant",
       "system_tag": "system"
     }
   }
