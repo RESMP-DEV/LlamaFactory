@@ -29,7 +29,7 @@ from typing_extensions import override
 from ...extras import logging
 from ...extras.constants import IGNORE_INDEX
 from ..callbacks import SaveProcessorCallback
-from ..fp8_utils import configure_fp8_environment, patch_accelerator_for_fp8, verify_fp8_status
+from ..fp8_utils import configure_fp8_environment, patch_accelerator_for_fp8, patch_accelerator_for_fp8_torchao, verify_fp8_status
 from ..trainer_utils import create_custom_optimizer, create_custom_scheduler
 
 
@@ -61,8 +61,11 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         training_args: TrainingArguments = kwargs.get("args")
         if training_args.fp8:
             configure_fp8_environment(training_args)
-            if getattr(training_args, "fp8_backend", "auto") == "te":
+            _backend = getattr(training_args, "fp8_backend", "auto")
+            if _backend == "te":
                 patch_accelerator_for_fp8()
+            elif _backend in ("torchao", "auto"):
+                patch_accelerator_for_fp8_torchao(training_args)
 
         super().__init__(**kwargs)
         if processor is not None:
@@ -81,7 +84,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         if finetuning_args.use_badam:
             from badam import BAdamCallback, clip_grad_norm_old_version  # type: ignore
 
-            self.accelerator.clip_grad_norm_ = MethodType(clip_grad_norm_old_version, self.accelerator)
+            self.accelerator.clip_grad_norm_ = MethodType(
+                clip_grad_norm_old_version, self.accelerator)
             self.add_callback(BAdamCallback)
 
         self.ref_model = ref_model
@@ -91,18 +95,23 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
             if getattr(self.accelerator.state, "deepspeed_plugin", None) is not None:
                 if not (
-                    getattr(ref_model, "is_loaded_in_8bit", False) or getattr(ref_model, "is_loaded_in_4bit", False)
+                    getattr(ref_model, "is_loaded_in_8bit", False) or getattr(
+                        ref_model, "is_loaded_in_4bit", False)
                 ):  # quantized models are already set on the correct device
-                    self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
+                    self.ref_model = prepare_deepspeed(
+                        self.ref_model, self.accelerator)
             elif getattr(self.accelerator.state, "fsdp_plugin", None) is not None:
                 if self.accelerator.is_fsdp2:
                     from accelerate.utils.fsdp_utils import fsdp2_prepare_model
 
-                    self.ref_model = fsdp2_prepare_model(self.accelerator, self.ref_model)
+                    self.ref_model = fsdp2_prepare_model(
+                        self.accelerator, self.ref_model)
                 else:
-                    self.ref_model = prepare_fsdp(self.ref_model, self.accelerator)
+                    self.ref_model = prepare_fsdp(
+                        self.ref_model, self.accelerator)
             else:
-                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+                self.ref_model = self.accelerator.prepare_model(
+                    self.ref_model, evaluation_mode=True)
                 self.ref_model.eval()
 
         if finetuning_args.use_dft_loss:
@@ -124,13 +133,15 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 asft_alpha=finetuning_args.asft_alpha,
             )
 
-        if training_args.fp8 and hasattr(self, "accelerator"):  # verify FP8 status after trainer initialization
+        # verify FP8 status after trainer initialization
+        if training_args.fp8 and hasattr(self, "accelerator"):
             verify_fp8_status(self.accelerator, training_args)
 
     @override
     def create_optimizer(self) -> "torch.optim.Optimizer":
         if self.optimizer is None:
-            self.optimizer = create_custom_optimizer(self.model, self.args, self.finetuning_args)
+            self.optimizer = create_custom_optimizer(
+                self.model, self.args, self.finetuning_args)
         return super().create_optimizer()
 
     @override
@@ -183,7 +194,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             model, inputs, prediction_loss_only=prediction_loss_only, ignore_keys=ignore_keys, **gen_kwargs
         )
         if generated_tokens is not None and self.args.predict_with_generate:
-            generated_tokens[:, : inputs["input_ids"].size(-1)] = self.processing_class.pad_token_id
+            generated_tokens[:, : inputs["input_ids"].size(
+                -1)] = self.processing_class.pad_token_id
             generated_tokens = generated_tokens.contiguous()
 
         return loss, generated_tokens, labels
@@ -198,8 +210,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         if not self.is_world_process_zero():
             return
 
-        output_prediction_file = os.path.join(self.args.output_dir, "generated_predictions.jsonl")
-        logger.info_rank0(f"Saving prediction results to {output_prediction_file}")
+        output_prediction_file = os.path.join(
+            self.args.output_dir, "generated_predictions.jsonl")
+        logger.info_rank0(
+            f"Saving prediction results to {output_prediction_file}")
 
         labels = np.where(
             predict_results.label_ids != IGNORE_INDEX, predict_results.label_ids, self.processing_class.pad_token_id
@@ -211,14 +225,20 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         )
 
         for i in range(len(preds)):
-            pad_len = np.nonzero(preds[i] != self.processing_class.pad_token_id)[0]
+            pad_len = np.nonzero(
+                preds[i] != self.processing_class.pad_token_id)[0]
             if len(pad_len):  # move pad token to last
-                preds[i] = np.concatenate((preds[i][pad_len[0] :], preds[i][: pad_len[0]]), axis=-1)
+                preds[i] = np.concatenate(
+                    (preds[i][pad_len[0]:], preds[i][: pad_len[0]]), axis=-1)
 
-        decoded_inputs = self.processing_class.batch_decode(dataset["input_ids"], skip_special_tokens=False)
-        decoded_preds = self.processing_class.batch_decode(preds, skip_special_tokens=skip_special_tokens)
-        decoded_labels = self.processing_class.batch_decode(labels, skip_special_tokens=skip_special_tokens)
+        decoded_inputs = self.processing_class.batch_decode(
+            dataset["input_ids"], skip_special_tokens=False)
+        decoded_preds = self.processing_class.batch_decode(
+            preds, skip_special_tokens=skip_special_tokens)
+        decoded_labels = self.processing_class.batch_decode(
+            labels, skip_special_tokens=skip_special_tokens)
 
         with open(output_prediction_file, "w", encoding="utf-8") as f:
             for text, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
-                f.write(json.dumps({"prompt": text, "predict": pred, "label": label}, ensure_ascii=False) + "\n")
+                f.write(json.dumps(
+                    {"prompt": text, "predict": pred, "label": label}, ensure_ascii=False) + "\n")

@@ -58,14 +58,8 @@ def create_fp8_kwargs(training_args: "TrainingArguments") -> list[Any]:
             from torchao.float8 import Float8LinearConfig
 
             # Use rowwise scaling for better performance (as recommended by torchao)
-            # Configure alignment requirements for FP8 kernels
+            # from_recipe_name returns a frozen dataclass; don't try to modify its fields
             config = Float8LinearConfig.from_recipe_name("rowwise")
-
-            # Enable alignment for better kernel performance
-            if hasattr(config, "enable_amax_init"):
-                config.enable_amax_init = True
-            if hasattr(config, "enable_pre_and_post_forward"):
-                config.enable_pre_and_post_forward = True
 
         # Create module filter function to skip problematic layers
         # TorchAO FP8 requires dimensions divisible by 16 for optimal kernels
@@ -73,6 +67,13 @@ def create_fp8_kwargs(training_args: "TrainingArguments") -> list[Any]:
             # Skip embedding and output layers for numerical stability
             skip_layers = ["embed", "lm_head", "output", "classifier"]
             if any(skip_name in layer_name.lower() for skip_name in skip_layers):
+                return False
+
+            # Skip MoE expert projections: routed token groups can create dynamic GEMM
+            # shapes that violate torch._scaled_mm alignment constraints (e.g. K not /16).
+            # Keep FP8 on standard dense/attention linears only.
+            moe_skip_tokens = ["experts", "router", "gate", "mlp"]
+            if any(token in layer_name.lower() for token in moe_skip_tokens):
                 return False
 
             # Only convert Linear layers
@@ -149,7 +150,8 @@ def configure_fp8_environment(training_args: "TrainingArguments") -> None:
         os.environ["FP8_ENABLE_FSDP_FLOAT8_ALL_GATHER"] = "true"
         logger.info_rank0("Set FP8_ENABLE_FSDP_FLOAT8_ALL_GATHER=true")
 
-    logger.info_rank0("FP8 environment configured - all FP8 training handled by HuggingFace Accelerate")
+    logger.info_rank0(
+        "FP8 environment configured - all FP8 training handled by HuggingFace Accelerate")
 
 
 def verify_fp8_status(accelerator, training_args: "TrainingArguments") -> None:
@@ -176,10 +178,43 @@ def verify_fp8_status(accelerator, training_args: "TrainingArguments") -> None:
     else:
         logger.info_rank0(f"FP8 training enabled with {backend} backend.")
 
-    logger.info_rank0(f"Accelerate FP8 status - enabled: {fp8_enabled}, backend: {fp8_backend_type}")
+    logger.info_rank0(
+        f"Accelerate FP8 status - enabled: {fp8_enabled}, backend: {fp8_backend_type}")
 
     if not fp8_enabled:
-        logger.info_rank0("WARNING: FP8 was requested but Accelerate shows fp8_enabled=False. FP8 may not be working.")
+        logger.info_rank0(
+            "WARNING: FP8 was requested but Accelerate shows fp8_enabled=False. FP8 may not be working.")
+
+
+def patch_accelerator_for_fp8_torchao(training_args: "TrainingArguments") -> None:
+    """Patch Accelerator to inject TorchAO FP8 AORecipeKwargs.
+
+    The HuggingFace Trainer creates Accelerator internally without kwargs_handlers,
+    so we monkey-patch Accelerator.__init__ to inject the TorchAO FP8 recipe.
+    """
+    from accelerate import Accelerator
+
+    if getattr(Accelerator, "_torchao_fp8_patched", False):
+        return
+
+    fp8_kwargs = create_fp8_kwargs(training_args)
+    if not fp8_kwargs:
+        logger.info_rank0(
+            "No FP8 kwargs created, skipping torchao Accelerator patch.")
+        return
+
+    original_init = Accelerator.__init__
+
+    def patched_init(self, *args, **kwargs):
+        if "kwargs_handlers" not in kwargs or not kwargs["kwargs_handlers"]:
+            kwargs["kwargs_handlers"] = fp8_kwargs
+            kwargs["mixed_precision"] = "fp8"
+        return original_init(self, *args, **kwargs)
+
+    Accelerator.__init__ = patched_init
+    Accelerator._torchao_fp8_patched = True
+    logger.info_rank0(
+        "Patched Accelerator.__init__ to inject TorchAO AORecipeKwargs for FP8 training.")
 
 
 def patch_accelerator_for_fp8() -> None:
@@ -215,11 +250,13 @@ def patch_accelerator_for_fp8() -> None:
         if "kwargs_handlers" not in kwargs or not kwargs["kwargs_handlers"]:
             if use_te_recipe:
                 kwargs["kwargs_handlers"] = [
-                    FP8Recipe(fp8_format="HYBRID", amax_history_len=16, amax_compute_algo="max")
+                    FP8Recipe(fp8_format="HYBRID",
+                              amax_history_len=16, amax_compute_algo="max")
                 ]
             else:
                 kwargs["kwargs_handlers"] = [
-                    FP8Recipe(backend="TE", fp8_format="HYBRID", amax_history_len=16, amax_compute_algo="max")
+                    FP8Recipe(backend="TE", fp8_format="HYBRID",
+                              amax_history_len=16, amax_compute_algo="max")
                 ]
             # Only force mixed_precision when we inject handlers
             kwargs["mixed_precision"] = "fp8"

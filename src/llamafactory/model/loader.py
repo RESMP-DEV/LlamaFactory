@@ -60,7 +60,8 @@ def _get_init_kwargs(model_args: "ModelArguments") -> dict[str, Any]:
     Note: including inplace operation of model_args.
     """
     skip_check_imports()
-    model_args.model_name_or_path = try_download_model_from_other_hub(model_args)
+    model_args.model_name_or_path = try_download_model_from_other_hub(
+        model_args)
     return {
         "trust_remote_code": model_args.trust_remote_code,
         "cache_dir": model_args.cache_dir,
@@ -114,7 +115,8 @@ def load_tokenizer(model_args: "ModelArguments") -> "TokenizerModule":
     # Avoid load tokenizer, see:
     # https://github.com/huggingface/transformers/blob/v4.40.0/src/transformers/models/auto/processing_auto.py#L324
     if processor is not None and "Processor" not in processor.__class__.__name__:
-        logger.debug("The loaded processor is not an instance of Processor. Dropping it.")
+        logger.debug(
+            "The loaded processor is not an instance of Processor. Dropping it.")
         processor = None
 
     if processor is not None:
@@ -140,7 +142,8 @@ def load_model(
     init_kwargs = _get_init_kwargs(model_args)
     config = load_config(model_args)
     patch_config(config, tokenizer, model_args, init_kwargs, is_trainable)
-    apply_liger_kernel(config, model_args, is_trainable, require_logits=(finetuning_args.stage not in ["pt", "sft"]))
+    apply_liger_kernel(config, model_args, is_trainable, require_logits=(
+        finetuning_args.stage not in ["pt", "sft"]))
 
     model = None
     lazy_load = False
@@ -153,7 +156,8 @@ def load_model(
         if model_args.adapter_name_or_path is not None:
             lazy_load = True
         elif is_trainable:
-            model = load_unsloth_pretrained_model(config, model_args, finetuning_args)
+            model = load_unsloth_pretrained_model(
+                config, model_args, finetuning_args)
 
     if model is None and not lazy_load:
         init_kwargs["config"] = config
@@ -167,15 +171,51 @@ def load_model(
                 load_class = AutoModelForImageTextToText
             elif type(config) in AutoModelForSeq2SeqLM._model_mapping.keys():  # audio-text
                 load_class = AutoModelForSeq2SeqLM
-            elif type(config) in AutoModelForTextToWaveform._model_mapping.keys():  # audio-text for qwen omni
+            # audio-text for qwen omni
+            elif type(config) in AutoModelForTextToWaveform._model_mapping.keys():
                 load_class = AutoModelForTextToWaveform
             else:
                 load_class = AutoModelForCausalLM
 
             if model_args.train_from_scratch:
-                model = load_class.from_config(config, trust_remote_code=model_args.trust_remote_code)
+                model = load_class.from_config(
+                    config, trust_remote_code=model_args.trust_remote_code)
             else:
-                model = load_class.from_pretrained(**init_kwargs)
+                # FSDP-efficient loading: only rank-0 loads weights from disk.
+                # Non-rank-0 processes create a CPU-empty skeleton; sync_module_states=True
+                # in the FSDP config then broadcasts rank-0 weights before sharding.
+                # Without this, all 8 ranks each load the full checkpoint into DRAM (~1.6 TB).
+                #
+                # IMPORTANT: We cannot use is_fsdp_enabled() or dist.is_initialized() here
+                # because torch.distributed has NOT been initialized yet at this point in the
+                # training flow (Accelerator() is created later by the Trainer). Instead, we
+                # check the env vars that accelerate sets at process startup.
+                import os as _os
+                _fsdp_active = _os.environ.get(
+                    "ACCELERATE_USE_FSDP", "False").lower() in ("1", "true", "yes")
+                _local_rank = int(_os.environ.get("LOCAL_RANK", "0"))
+                if _fsdp_active and _local_rank != 0:
+                    from accelerate import init_empty_weights
+                    with init_empty_weights():
+                        model = load_class.from_config(
+                            config, trust_remote_code=model_args.trust_remote_code)
+                    # Keep model on meta device (DO NOT call to_empty('cpu')).
+                    # - Meta tensors use ~0 CPU RAM vs ~200 GB with to_empty('cpu')
+                    # - accelerate fsdp_utils.py line 659: `model.to(meta)` is called anyway
+                    #   before `fully_shard`, so to_empty('cpu') would just be wasted RAM
+                    # - fsdp2_load_full_state_dict expects meta tensors and broadcasts from rank 0
+                    # - State dict of meta model = meta tensors (0 RAM), passed but unused by non-rank-0
+                else:
+                    # Prevent a huge pre-sharding GPU memory spike on rank-0:
+                    # load full checkpoint to CPU first, then let FSDP shard/move later.
+                    if _fsdp_active and _local_rank == 0 and "device_map" not in init_kwargs:
+                        init_kwargs["device_map"] = {"": "cpu"}
+                    if _fsdp_active and _local_rank == 0:
+                        # The low_cpu_mem_usage "materialize" loader can still stage tensors on CUDA
+                        # and blow up rank-0 memory for very large MoE checkpoints.
+                        # Use classic CPU loading path on rank-0 for stability.
+                        init_kwargs["low_cpu_mem_usage"] = False
+                    model = load_class.from_pretrained(**init_kwargs)
                 if getattr(model.config, "model_type", None) in ["qwen2_5_omni", "qwen3_omni_moe"]:
                     model = getattr(model, "thinker")
 
@@ -199,7 +239,8 @@ def load_model(
             _dev = get_current_device()
             if _torch.cuda.is_available():
                 _mem_before = _torch.cuda.memory_allocated(_dev) / (1024**3)
-                logger.info_rank0(f"GPU memory before BnB move: {_mem_before:.2f} GiB allocated on {_dev}")
+                logger.info_rank0(
+                    f"GPU memory before BnB move: {_mem_before:.2f} GiB allocated on {_dev}")
 
             # For models with 3D expert parameters (e.g. Qwen3Next), BnB's replace_with_bnb_linear
             # only handles nn.Linear — the batched expert tensors need a separate quantization pass.
@@ -207,7 +248,8 @@ def load_model(
                 from .model_utils.quantization import _quantize_qwen3next_experts
                 _quantize_qwen3next_experts(model, model_args)
 
-            logger.info_rank0("Moving BnB 4-bit model to GPU (pre-quantized uint8 on CPU -> CUDA)...")
+            logger.info_rank0(
+                "Moving BnB 4-bit model to GPU (pre-quantized uint8 on CPU -> CUDA)...")
             # Explicitly move each Params4bit first (bnb_quantized=True, moves uint8)
             import bitsandbytes as _bnb
             for _mod_name, _mod in model.named_modules():
@@ -232,9 +274,11 @@ def load_model(
                         pass
             if _torch.cuda.is_available():
                 _mem_after = _torch.cuda.memory_allocated(_dev) / (1024**3)
-                logger.info_rank0(f"GPU memory after BnB move: {_mem_after:.2f} GiB (delta +{_mem_after - _mem_before:.2f} GiB)")
+                logger.info_rank0(
+                    f"GPU memory after BnB move: {_mem_after:.2f} GiB (delta +{_mem_after - _mem_before:.2f} GiB)")
 
-    model = init_adapter(config, model, model_args, finetuning_args, is_trainable)
+    model = init_adapter(config, model, model_args,
+                         finetuning_args, is_trainable)
 
     if add_valuehead:
         model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
@@ -248,7 +292,8 @@ def load_model(
         vhead_params = load_valuehead_params(vhead_path, model_args)
         if vhead_params is not None:
             model.load_state_dict(vhead_params, strict=False)
-            logger.info_rank0(f"Loaded valuehead from checkpoint: {vhead_path}")
+            logger.info_rank0(
+                f"Loaded valuehead from checkpoint: {vhead_path}")
 
     # Conv3D is not recommended when using torch 2.9.x
     if is_torch_version_greater_than("2.9.0") and not is_torch_version_greater_than("2.10.0"):
@@ -275,7 +320,8 @@ def load_model(
         )
         from ..v1.plugins.model_plugins.kernels.interface import apply_default_kernels
 
-        model = apply_default_kernels(model, include_kernels=model_args.use_v1_kernels)
+        model = apply_default_kernels(
+            model, include_kernels=model_args.use_v1_kernels)
 
     trainable_params, all_param = count_parameters(model)
     if is_trainable:
@@ -290,6 +336,7 @@ def load_model(
 
     if model_args.print_param_status and int(os.getenv("LOCAL_RANK", "0")) == 0:
         for name, param in model.named_parameters():
-            print(f"name: {name}, dtype: {param.dtype}, device: {param.device}, trainable: {param.requires_grad}")
+            print(
+                f"name: {name}, dtype: {param.dtype}, device: {param.device}, trainable: {param.requires_grad}")
 
     return model
