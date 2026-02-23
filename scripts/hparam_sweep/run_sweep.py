@@ -141,7 +141,7 @@ def run_trial(
             "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
             "FORCE_TORCHRUN": "1",
             "DISABLE_VERSION_CHECK": "1",
-            "NPROC_PER_NODE": os.getenv("NPROC_PER_NODE", "1"),
+            "NPROC_PER_NODE": os.getenv("NPROC_PER_NODE", "8"),
             "OMP_NUM_THREADS": "1",
         }
     )
