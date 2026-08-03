@@ -182,3 +182,6 @@ swanlog/
 generated_predictions.jsonl
 predictions_score.json
 data/lilith_v0.2/
+
+# Local semantic-search index
+.sindexer/
